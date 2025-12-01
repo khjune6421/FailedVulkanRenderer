@@ -32,6 +32,15 @@ class HelloTriangleApplication
 	raii::Context context{};
 	raii::Instance instance = nullptr;
 	raii::DebugUtilsMessengerEXT debugMessenger = nullptr;
+	raii::PhysicalDevice physicalDevice = nullptr;
+
+	vector<const char*> requiredDeviceExtension =
+	{
+		KHRSwapchainExtensionName,
+		KHRSpirv14ExtensionName,
+		KHRSynchronization2ExtensionName,
+		KHRCreateRenderpass2ExtensionName
+	};
 
 	void InitWindow()
 	{
@@ -121,6 +130,36 @@ class HelloTriangleApplication
 		debugMessenger = instance.createDebugUtilsMessengerEXT(debugUtilsMessengerCreateInfoEXT);
 	}
 
+	void PickPhysicalDevice()
+	{
+		vector<raii::PhysicalDevice> devices = instance.enumeratePhysicalDevices();
+		const auto devIter = ranges::find_if
+		(
+			devices,
+			[&](raii::PhysicalDevice const& device)
+			{
+				bool supportsVulkan1_3 = device.getProperties().apiVersion >= VK_API_VERSION_1_3;
+
+				vector<QueueFamilyProperties> queueFamilies = device.getQueueFamilyProperties();
+				bool supportsGraphics = ranges::any_of(queueFamilies, [](const QueueFamilyProperties& qfp) { return !!(qfp.queueFlags & QueueFlagBits::eGraphics); });
+
+				vector<ExtensionProperties> availableDeviceExtensions = device.enumerateDeviceExtensionProperties();
+				bool supportsAllRequiredExtensions = ranges::all_of(requiredDeviceExtension, [&availableDeviceExtensions](const char* requiredDeviceExtension)
+					{
+					return ranges::any_of(availableDeviceExtensions, [requiredDeviceExtension](const ExtensionProperties& availableDeviceExtension)
+						{
+							return strcmp(availableDeviceExtension.extensionName, requiredDeviceExtension) == 0;
+						});
+					});
+
+				auto features = device.template getFeatures2<PhysicalDeviceFeatures2, PhysicalDeviceVulkan13Features, PhysicalDeviceExtendedDynamicStateFeaturesEXT>();
+				bool supportsRequiredFeatures = features.template get<PhysicalDeviceVulkan13Features>().dynamicRendering &&
+					features.template get<PhysicalDeviceExtendedDynamicStateFeaturesEXT>().extendedDynamicState;
+
+				return supportsVulkan1_3 && supportsGraphics && supportsAllRequiredExtensions && supportsRequiredFeatures;
+			});
+	}
+
 	vector<const char*> getRequiredExtensions()
 	{
 		uint32_t glfwExtensionCount = 0;
@@ -141,7 +180,7 @@ class HelloTriangleApplication
 		void* /*pUserData*/
 	)
 	{
-		if (severity == DebugUtilsMessageSeverityFlagBitsEXT::eError || severity == DebugUtilsMessageSeverityFlagBitsEXT::eWarning)
+		if (severity & (DebugUtilsMessageSeverityFlagBitsEXT::eError | DebugUtilsMessageSeverityFlagBitsEXT::eWarning))
 		{
 			cerr << "validation layer: type " << to_string(type) << " msg: " << pCallbackData->pMessage << endl;
 		}
