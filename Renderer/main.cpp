@@ -67,6 +67,8 @@ class HelloTriangleApplication
 	uint32_t semaphoreIndex = 0;
 	uint32_t currentFrame = 0;
 
+	bool framebufferResized = false;
+
 	void InitWindow()
 	{
 		glfwInit();
@@ -75,6 +77,14 @@ class HelloTriangleApplication
 		glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 
 		window.reset(glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", nullptr, nullptr));
+		glfwSetWindowUserPointer(window.get(), this);
+		glfwSetFramebufferSizeCallback(window.get(), FramebufferResizeCallback);
+	}
+
+	static void FramebufferResizeCallback(GLFWwindow* window, int width, int height)
+	{
+		auto app = reinterpret_cast<HelloTriangleApplication*>(glfwGetWindowUserPointer(window));
+		app->framebufferResized = true;
 	}
 
 	void InitVulkan()
@@ -99,12 +109,37 @@ class HelloTriangleApplication
 			glfwPollEvents();
 			DrawFrame();
 		}
+
 		device.waitIdle();
+	}
+
+	void CleanupSwapChain()
+	{
+		swapChainImageViews.clear();
+		swapChain = nullptr;
 	}
 
 	void Cleanup()
 	{
 		glfwTerminate();
+	}
+
+	void RecreateSwapChain()
+	{
+		int width = 0, height = 0;
+		glfwGetFramebufferSize(window.get(), &width, &height);
+
+		while (width == 0 || height == 0)
+		{
+			glfwGetFramebufferSize(window.get(), &width, &height);
+			glfwWaitEvents();
+		}
+
+		device.waitIdle();
+
+		CleanupSwapChain();
+		CreateSwapChain();
+		CreateImageViews();
 	}
 
 	void CreateInstance()
@@ -243,7 +278,14 @@ class HelloTriangleApplication
 		PhysicalDeviceExtendedDynamicStateFeaturesEXT extendedDynamicStateFeatures = {};
 		extendedDynamicStateFeatures.extendedDynamicState = true;
 
-		StructureChain<PhysicalDeviceFeatures2, PhysicalDeviceVulkan11Features, PhysicalDeviceVulkan13Features, PhysicalDeviceExtendedDynamicStateFeaturesEXT> featureStructureChain
+		StructureChain
+			<
+			PhysicalDeviceFeatures2,
+			PhysicalDeviceVulkan11Features,
+			PhysicalDeviceVulkan13Features,
+			PhysicalDeviceExtendedDynamicStateFeaturesEXT
+			>
+			featureStructureChain
 		{
 			featureChain,
 			vulkan11Features,
@@ -532,6 +574,9 @@ class HelloTriangleApplication
 
 		auto [result, imageIndex] = swapChain.acquireNextImage(UINT64_MAX, *presentCompleteSemaphore[semaphoreIndex], nullptr);
 
+		if (result == Result::eErrorOutOfDateKHR) { RecreateSwapChain(); return; }
+		else if (result != Result::eSuccess && result != Result::eSuboptimalKHR) throw runtime_error("failed to acquire swap chain image!");
+
 		device.resetFences(*inFlightFences[currentFrame]);
 		commandBuffers[currentFrame].reset();
 		RecordCommandBuffer(imageIndex);
@@ -554,19 +599,26 @@ class HelloTriangleApplication
 		presentInfoKHR.swapchainCount = 1;
 		presentInfoKHR.pSwapchains = &*swapChain;
 		presentInfoKHR.pImageIndices = &imageIndex;
-		result = queue.presentKHR(presentInfoKHR);
 		
-		switch (result)
+		try
 		{
-			case Result::eSuccess:
-				break;
+			result = queue.presentKHR(presentInfoKHR);
 
-			case Result::eSuboptimalKHR:
-				cout << "swap chain is suboptimal!" << endl;
-				break;
-
-			default:
-				throw runtime_error("failed to present swap chain image!");
+			if (result == Result::eErrorOutOfDateKHR || result == Result::eSuboptimalKHR || framebufferResized)
+			{
+				framebufferResized = false;
+				RecreateSwapChain();
+			}
+			else if (result != Result::eSuccess) throw runtime_error("failed to present swap chain image!");
+		}
+		catch (const SystemError& e)
+		{
+			if (e.code().value() == static_cast<int>(Result::eErrorOutOfDateKHR))
+			{
+				RecreateSwapChain();
+				return;
+			}
+			else throw;
 		}
 
 		semaphoreIndex = (semaphoreIndex + 1) % presentCompleteSemaphore.size();
