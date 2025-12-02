@@ -4,14 +4,16 @@ import vulkan_hpp;
 #endif
 
 #include <vulkan/vulkan_raii.hpp>
-#include <glm/glm.hpp>
 
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 #include <GLFW/glfw3.h>
 
 #include <memory>
 #include <iostream>
 #include <cstdlib>
 #include <fstream>
+#include <chrono>
 
 using namespace std;
 using namespace vk;
@@ -30,6 +32,14 @@ struct Vertex
 			VertexInputAttributeDescription(1, 0, Format::eR32G32B32Sfloat, offsetof(Vertex, color))
 		};
 	}
+};
+
+struct MatrixUB
+{
+	glm::mat4 world;
+	glm::mat4 view;
+	glm::mat4 proj;
+	glm::mat4 WVP;
 };
 
 const vector<Vertex> vertices =
@@ -85,6 +95,10 @@ class HelloTriangleApplication
 	Extent2D m_swapChainExtent{};
 	vector<raii::ImageView> m_swapChainImageViews;
 
+	raii::DescriptorSetLayout m_descriptorSetLayout = nullptr;
+	raii::DescriptorPool m_descriptorPool = nullptr;
+	vector<raii::DescriptorSet> m_descriptorSets;
+
 	raii::PipelineLayout m_pipelineLayout = nullptr;
 	raii::Pipeline m_graphicsPipeline = nullptr;
 
@@ -92,6 +106,10 @@ class HelloTriangleApplication
 	raii::DeviceMemory m_vertexBufferMemory = nullptr;
 	raii::Buffer m_indexBuffer = nullptr;
 	raii::DeviceMemory m_indexBufferMemory = nullptr;
+
+	vector<raii::Buffer> m_uniformBuffers;
+	vector<raii::DeviceMemory> m_uniformBuffersMemory;
+	vector<void*> m_uniformBuffersMapped;
 
 	raii::CommandPool m_commandPool = nullptr;
 	vector<raii::CommandBuffer> m_commandBuffers;
@@ -135,10 +153,14 @@ class HelloTriangleApplication
 		CreateLogicalDevice();
 		CreateSwapChain();
 		CreateImageViews();
+		CreateDescriptorSetLayout();
 		CreateGraphicsPipeline();
 		CreateCommandPool();
 		CreateVertexBuffer();
 		CreateIndexBuffer();
+		CreateUniformBuffers();
+		CreateDescriptorPool();
+		CreateDescriptorSets();
 		CreateCommandBuffer();
 		CreateSyncObjects();
 	}
@@ -394,6 +416,67 @@ class HelloTriangleApplication
 		}
 	}
 
+	void CreateDescriptorPool()
+	{
+		DescriptorPoolSize poolSize{};
+		poolSize.type = DescriptorType::eUniformBuffer;
+		poolSize.descriptorCount = MAX_FRAMES_IN_FLIGHT;
+
+		DescriptorPoolCreateInfo poolInfo{};
+		poolInfo.flags = DescriptorPoolCreateFlagBits::eFreeDescriptorSet;
+		poolInfo.maxSets = MAX_FRAMES_IN_FLIGHT;
+		poolInfo.poolSizeCount = 1;
+		poolInfo.pPoolSizes = &poolSize;
+
+		m_descriptorPool = raii::DescriptorPool{ m_device, poolInfo };
+	}
+
+	void CreateDescriptorSets()
+	{
+		vector<DescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, *m_descriptorSetLayout);
+		DescriptorSetAllocateInfo allocInfo{};
+		allocInfo.descriptorPool = *m_descriptorPool;
+		allocInfo.descriptorSetCount = static_cast<uint32_t>(layouts.size());
+		allocInfo.pSetLayouts = layouts.data();
+
+		m_descriptorSets = m_device.allocateDescriptorSets(allocInfo);
+
+		for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+		{
+			constexpr size_t BUFFER_SIZE = sizeof(MatrixUB);
+
+			DescriptorBufferInfo bufferInfo{};
+			bufferInfo.buffer = *m_uniformBuffers[i];
+			bufferInfo.offset = 0;
+			bufferInfo.range = BUFFER_SIZE;
+
+			WriteDescriptorSet descriptorWrite{};
+			descriptorWrite.dstSet = *m_descriptorSets[i];
+			descriptorWrite.dstBinding = 0;
+			descriptorWrite.dstArrayElement = 0;
+			descriptorWrite.descriptorCount = 1;
+			descriptorWrite.descriptorType = DescriptorType::eUniformBuffer;
+			descriptorWrite.pBufferInfo = &bufferInfo;
+
+			m_device.updateDescriptorSets(descriptorWrite, nullptr);
+		}
+	}
+
+	void CreateDescriptorSetLayout()
+	{
+		DescriptorSetLayoutBinding uboLayoutBinding{};
+		uboLayoutBinding.binding = 0;
+		uboLayoutBinding.descriptorType = DescriptorType::eUniformBuffer;
+		uboLayoutBinding.descriptorCount = 1;
+		uboLayoutBinding.stageFlags = ShaderStageFlagBits::eVertex;
+
+		DescriptorSetLayoutCreateInfo layoutInfo{};
+		layoutInfo.bindingCount = 1;
+		layoutInfo.pBindings = &uboLayoutBinding;
+
+		m_descriptorSetLayout = raii::DescriptorSetLayout{ m_device, layoutInfo };
+	}
+
 	void CreateGraphicsPipeline()
 	{
 		raii::ShaderModule shaderModule = CreateShaderModule(ReadFile("Shader/Slang.spv"));
@@ -431,7 +514,7 @@ class HelloTriangleApplication
 		rasterizer.rasterizerDiscardEnable = False;
 		rasterizer.polygonMode = PolygonMode::eFill;
 		rasterizer.cullMode = CullModeFlagBits::eBack;
-		rasterizer.frontFace = FrontFace::eClockwise;
+		rasterizer.frontFace = FrontFace::eCounterClockwise;
 		rasterizer.depthBiasEnable = False;
 		rasterizer.depthBiasSlopeFactor = 1.0f;
 		rasterizer.lineWidth = 1.0f;
@@ -461,7 +544,8 @@ class HelloTriangleApplication
 		dynamicState.pDynamicStates = dynamicStates.data();
 
 		PipelineLayoutCreateInfo pipelineLayoutInfo{};
-		pipelineLayoutInfo.setLayoutCount = 0;
+		pipelineLayoutInfo.setLayoutCount = 1;
+		pipelineLayoutInfo.pSetLayouts = &*m_descriptorSetLayout;
 		pipelineLayoutInfo.pushConstantRangeCount = 0;
 
 		m_pipelineLayout = raii::PipelineLayout{ m_device, pipelineLayoutInfo };
@@ -498,6 +582,26 @@ class HelloTriangleApplication
 		poolInfo.queueFamilyIndex = m_queueIndex;
 
 		m_commandPool = raii::CommandPool{ m_device, poolInfo };
+	}
+
+	void CreateUniformBuffers()
+	{
+		m_uniformBuffers.clear();
+		m_uniformBuffersMemory.clear();
+		m_uniformBuffersMapped.clear();
+
+		for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+		{
+			constexpr DeviceSize BUFFER_SIZE = sizeof(MatrixUB);
+
+			raii::Buffer uniformBuffer({});
+			raii::DeviceMemory uniformBufferMemory({});
+
+			CreateBuffer(uniformBuffer, uniformBufferMemory, BUFFER_SIZE, BufferUsageFlagBits::eUniformBuffer, MemoryPropertyFlagBits::eHostVisible | MemoryPropertyFlagBits::eHostCoherent);
+			m_uniformBuffers.push_back(move(uniformBuffer));
+			m_uniformBuffersMemory.push_back(move(uniformBufferMemory));
+			m_uniformBuffersMapped.push_back(m_uniformBuffersMemory[i].mapMemory(0, BUFFER_SIZE));
+		}
 	}
 
 	void CreateVertexBuffer()
@@ -628,6 +732,7 @@ class HelloTriangleApplication
 		m_commandBuffers[m_currentFrame].setViewport(0, Viewport{ 0.0f, 0.0f, static_cast<float>(m_swapChainExtent.width), static_cast<float>(m_swapChainExtent.height), 0.0f, 1.0f });
 		m_commandBuffers[m_currentFrame].setScissor(0, Rect2D{ Offset2D{ 0, 0 }, m_swapChainExtent });
 
+		m_commandBuffers[m_currentFrame].bindDescriptorSets(PipelineBindPoint::eGraphics, *m_pipelineLayout, 0, { *m_descriptorSets[m_currentFrame] }, {});
 		m_commandBuffers[m_currentFrame].bindVertexBuffers(0, { *m_vertexBuffer }, { 0 });
 		m_commandBuffers[m_currentFrame].bindIndexBuffer(*m_indexBuffer, 0, IndexTypeValue<decltype(indices)::value_type>::value);
 		m_commandBuffers[m_currentFrame].drawIndexed(static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
@@ -699,6 +804,25 @@ class HelloTriangleApplication
 		for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) m_inFlightFences.emplace_back(m_device, fenceInfo);
 	}
 
+	void UpdateUniformBuffer(uint32_t currentFrame)
+	{
+		static chrono::steady_clock::time_point startTime = chrono::high_resolution_clock::now();
+
+		const chrono::steady_clock::time_point currentTime = chrono::high_resolution_clock::now();
+		const float time = chrono::duration<float>(currentTime - startTime).count();
+
+		MatrixUB MUB{};
+		MUB.world = glm::rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+		MUB.view = glm::lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+		MUB.proj = glm::perspective(glm::radians(45.0f), static_cast<float>(m_swapChainExtent.width) / static_cast<float>(m_swapChainExtent.height), 0.1f, 10.0f);
+		MUB.proj[1][1] *= -1.0f;
+		MUB.WVP = MUB.proj * MUB.view * MUB.world;
+
+		constexpr size_t BUFFER_SIZE = sizeof(MUB);
+
+		memcpy(m_uniformBuffersMapped[currentFrame], &MUB, BUFFER_SIZE);
+	}
+
 	void DrawFrame()
 	{
 		while (m_device.waitForFences(*m_inFlightFences[m_currentFrame], True, UINT64_MAX) == Result::eTimeout);
@@ -707,6 +831,8 @@ class HelloTriangleApplication
 
 		if (result == Result::eErrorOutOfDateKHR) { RecreateSwapChain(); return; }
 		else if (result != Result::eSuccess && result != Result::eSuboptimalKHR) throw runtime_error("failed to acquire swap chain image!");
+
+		UpdateUniformBuffer(m_currentFrame);
 
 		m_device.resetFences(*m_inFlightFences[m_currentFrame]);
 		m_commandBuffers[m_currentFrame].reset();

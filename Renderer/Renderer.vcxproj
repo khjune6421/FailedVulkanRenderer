@@ -154,6 +154,7 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="Shader\Shader.slang" />
+    <None Include="Shader\ShaderCompiler.bat" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

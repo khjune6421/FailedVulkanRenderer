@@ -1,3 +1,12 @@
+struct MatrixUB
+{
+    float4x4 world;
+    float4x4 view;
+    float4x4 proj;
+    float4x4 WVP;
+};
+ConstantBuffer<MatrixUB> MUB;
+
 struct VSInput
 {
     float2 inPos;
@@ -14,7 +23,7 @@ struct VSOutput
 VSOutput vertMain(VSInput input)
 {
     VSOutput output;
-    output.pos = float4(input.inPos, 0.0, 1.0);
+    output.pos = mul(MUB.WVP, float4(input.inPos, 0.0, 1.0));
     output.col = input.inCol;
     return output;
 }
