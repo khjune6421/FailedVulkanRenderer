@@ -34,9 +34,15 @@ struct Vertex
 
 const vector<Vertex> vertices =
 {
-	{ { 0.0f, -0.5f }, { 1.0f, 1.0f, 0.0f } },
-	{ { 0.5f,  0.5f }, { 0.0f, 1.0f, 1.0f } },
-	{ { -0.5f, 0.5f }, { 1.0f, 0.0f, 1.0f } }
+	{ { -0.5f, -0.5f }, { 1.0f, 0.0f, 0.0f } },
+	{ {  0.5f, -0.5f }, { 0.0f, 1.0f, 0.0f } },
+	{ {  0.5f,  0.5f }, { 0.0f, 0.0f, 1.0f } },
+	{ { -0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f } }
+};
+const vector<uint16_t> indices =
+{
+	0, 1, 2,
+	2, 3, 0
 };
 
 class HelloTriangleApplication
@@ -84,6 +90,8 @@ class HelloTriangleApplication
 
 	raii::Buffer m_vertexBuffer = nullptr;
 	raii::DeviceMemory m_vertexBufferMemory = nullptr;
+	raii::Buffer m_indexBuffer = nullptr;
+	raii::DeviceMemory m_indexBufferMemory = nullptr;
 
 	raii::CommandPool m_commandPool = nullptr;
 	vector<raii::CommandBuffer> m_commandBuffers;
@@ -130,6 +138,7 @@ class HelloTriangleApplication
 		CreateGraphicsPipeline();
 		CreateCommandPool();
 		CreateVertexBuffer();
+		CreateIndexBuffer();
 		CreateCommandBuffer();
 		CreateSyncObjects();
 	}
@@ -493,42 +502,52 @@ class HelloTriangleApplication
 
 	void CreateVertexBuffer()
 	{
-		BufferCreateInfo stagingBufferInfo{};
-		stagingBufferInfo.size = sizeof(vertices[0]) * vertices.size();
-		stagingBufferInfo.usage = BufferUsageFlagBits::eTransferSrc;
-		stagingBufferInfo.sharingMode = SharingMode::eExclusive;
-		raii::Buffer stagingBuffer = raii::Buffer{ m_device, stagingBufferInfo };
-
-		MemoryRequirements memRequirementsStaging = stagingBuffer.getMemoryRequirements();
-
-		MemoryAllocateInfo memoryAllocateInfoStaging{};
-		memoryAllocateInfoStaging.allocationSize = memRequirementsStaging.size;
-		memoryAllocateInfoStaging.memoryTypeIndex = FindMemoryType(memRequirementsStaging.memoryTypeBits, MemoryPropertyFlagBits::eHostVisible | MemoryPropertyFlagBits::eHostCoherent);
-		raii::DeviceMemory stagingBufferMemory = raii::DeviceMemory{ m_device, memoryAllocateInfoStaging };
-
-		stagingBuffer.bindMemory(*stagingBufferMemory, 0);
-		void* dataStaging = stagingBufferMemory.mapMemory(0, stagingBufferInfo.size);
-		memcpy(dataStaging, vertices.data(), stagingBufferInfo.size);
+		DeviceSize bufferSize = sizeof(vertices[0]) * vertices.size();
+		raii::Buffer stagingBuffer({});
+		raii::DeviceMemory stagingBufferMemory({});
+		CreateBuffer(stagingBuffer, stagingBufferMemory, bufferSize, BufferUsageFlagBits::eTransferSrc, MemoryPropertyFlagBits::eHostVisible | MemoryPropertyFlagBits::eHostCoherent);
+		
+		void* dataStaging = stagingBufferMemory.mapMemory(0, bufferSize);
+		memcpy(dataStaging, vertices.data(), static_cast<size_t>(bufferSize));
 		stagingBufferMemory.unmapMemory();
 
-		BufferCreateInfo vertexBufferInfo{};
-		vertexBufferInfo.size = sizeof(vertices[0]) * vertices.size();
-		vertexBufferInfo.usage = BufferUsageFlagBits::eVertexBuffer | BufferUsageFlagBits::eTransferDst;
-		vertexBufferInfo.sharingMode = SharingMode::eExclusive;
-		m_vertexBuffer = raii::Buffer{ m_device, vertexBufferInfo };
-
-		MemoryRequirements memRequirements = m_vertexBuffer.getMemoryRequirements();
-		MemoryAllocateInfo memoryAllocateInfo{};
-		memoryAllocateInfo.allocationSize = memRequirements.size;
-		memoryAllocateInfo.memoryTypeIndex = FindMemoryType(memRequirements.memoryTypeBits, MemoryPropertyFlagBits::eDeviceLocal);
-		m_vertexBufferMemory = raii::DeviceMemory{ m_device, memoryAllocateInfo };
-
-		m_vertexBuffer.bindMemory(*m_vertexBufferMemory, 0);
-
-		CopyBuffer(stagingBuffer, m_vertexBuffer, vertexBufferInfo.size);
+		CreateBuffer(m_vertexBuffer, m_vertexBufferMemory, bufferSize, BufferUsageFlagBits::eTransferDst | BufferUsageFlagBits::eVertexBuffer, MemoryPropertyFlagBits::eDeviceLocal);
+		CopyBuffer(stagingBuffer, m_vertexBuffer, bufferSize);
 	}
 
-	void CopyBuffer(raii::Buffer& srcBuffer, raii::Buffer& dstBuffer, VkDeviceSize size)
+	void CreateIndexBuffer()
+	{
+		DeviceSize bufferSize = sizeof(indices[0]) * indices.size();
+		raii::Buffer stagingBuffer({});
+		raii::DeviceMemory stagingBufferMemory({});
+		CreateBuffer(stagingBuffer, stagingBufferMemory, bufferSize, BufferUsageFlagBits::eTransferSrc, MemoryPropertyFlagBits::eHostVisible | MemoryPropertyFlagBits::eHostCoherent);
+		
+		void* data = stagingBufferMemory.mapMemory(0, bufferSize);
+		memcpy(data, indices.data(), static_cast<size_t>(bufferSize));
+		stagingBufferMemory.unmapMemory();
+
+		CreateBuffer(m_indexBuffer, m_indexBufferMemory, bufferSize, BufferUsageFlagBits::eTransferDst | BufferUsageFlagBits::eIndexBuffer, MemoryPropertyFlagBits::eDeviceLocal);
+		CopyBuffer(stagingBuffer, m_indexBuffer, bufferSize);
+	}
+
+	void CreateBuffer(raii::Buffer& buffer, raii::DeviceMemory& bufferMemory, DeviceSize size, BufferUsageFlags usage, MemoryPropertyFlags properties)
+	{
+		BufferCreateInfo bufferInfo{};
+		bufferInfo.size = size;
+		bufferInfo.usage = usage;
+		bufferInfo.sharingMode = SharingMode::eExclusive;
+		buffer = raii::Buffer{ m_device, bufferInfo };
+
+		MemoryRequirements memRequirements = buffer.getMemoryRequirements();
+		MemoryAllocateInfo memoryAllocateInfo{};
+		memoryAllocateInfo.allocationSize = memRequirements.size;
+		memoryAllocateInfo.memoryTypeIndex = FindMemoryType(memRequirements.memoryTypeBits, properties);
+		bufferMemory = raii::DeviceMemory{ m_device, memoryAllocateInfo };
+
+		buffer.bindMemory(*bufferMemory, 0);
+	}
+
+	void CopyBuffer(raii::Buffer& srcBuffer, raii::Buffer& dstBuffer, DeviceSize size)
 	{
 		CommandBufferAllocateInfo allocInfo{};
 		allocInfo.commandPool = m_commandPool;
@@ -605,10 +624,13 @@ class HelloTriangleApplication
 		m_commandBuffers[m_currentFrame].beginRendering(renderingInfo);
 
 		m_commandBuffers[m_currentFrame].bindPipeline(PipelineBindPoint::eGraphics, *m_graphicsPipeline);
+
 		m_commandBuffers[m_currentFrame].setViewport(0, Viewport{ 0.0f, 0.0f, static_cast<float>(m_swapChainExtent.width), static_cast<float>(m_swapChainExtent.height), 0.0f, 1.0f });
 		m_commandBuffers[m_currentFrame].setScissor(0, Rect2D{ Offset2D{ 0, 0 }, m_swapChainExtent });
+
 		m_commandBuffers[m_currentFrame].bindVertexBuffers(0, { *m_vertexBuffer }, { 0 });
-		m_commandBuffers[m_currentFrame].draw(3, 1, 0, 0);
+		m_commandBuffers[m_currentFrame].bindIndexBuffer(*m_indexBuffer, 0, IndexTypeValue<decltype(indices)::value_type>::value);
+		m_commandBuffers[m_currentFrame].drawIndexed(static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
 
 		m_commandBuffers[m_currentFrame].endRendering();
 
