@@ -10,6 +10,7 @@ import vulkan_hpp;
 #include <memory>
 #include <iostream>
 #include <cstdlib>
+#include <fstream>
 
 using namespace std;
 using namespace vk;
@@ -34,15 +35,8 @@ class HelloTriangleApplication
 	raii::DebugUtilsMessengerEXT debugMessenger = nullptr;
 	raii::SurfaceKHR surface = nullptr;
 	raii::PhysicalDevice physicalDevice = nullptr;
+
 	raii::Device device = nullptr;
-	raii::Queue graphicsQueue = nullptr;
-	raii::SwapchainKHR swapChain = nullptr;
-
-	vector<Image> swapChainImages;
-	SurfaceFormatKHR swapChainSurfaceFormat{};
-	Extent2D swapChainExtent{};
-	vector<raii::ImageView> swapChainImageViews;
-
 	vector<const char*> requiredDeviceExtension =
 	{
 		KHRSwapchainExtensionName,
@@ -50,6 +44,23 @@ class HelloTriangleApplication
 		KHRSynchronization2ExtensionName,
 		KHRCreateRenderpass2ExtensionName
 	};
+
+	raii::Queue queue = nullptr;
+	uint32_t queueIndex = ~0;
+
+	raii::SwapchainKHR swapChain = nullptr;
+	vector<Image> swapChainImages;
+	SurfaceFormatKHR swapChainSurfaceFormat{};
+	Extent2D swapChainExtent{};
+	vector<raii::ImageView> swapChainImageViews;
+
+	raii::PipelineLayout pipelineLayout = nullptr;
+	raii::Pipeline graphicsPipeline = nullptr;
+	raii::CommandPool commandPool = nullptr;
+	raii::CommandBuffer commandBuffer = nullptr;
+	raii::Semaphore presentCompleteSemaphore = nullptr;
+	raii::Semaphore renderFinishedSemaphore = nullptr;
+	raii::Fence drawFence = nullptr;
 
 	void InitWindow()
 	{
@@ -71,11 +82,19 @@ class HelloTriangleApplication
 		CreateSwapChain();
 		CreateImageViews();
 		CreateGraphicsPipeline();
+		CreateCommandPool();
+		CreateCommandBuffer();
+		CreateSyncObjects();
 	}
 
 	void MainLoop()
 	{
-		while (!glfwWindowShouldClose(window.get())) glfwPollEvents();
+		while (!glfwWindowShouldClose(window.get()))
+		{
+			glfwPollEvents();
+			DrawFrame();
+		}
+		device.waitIdle();
 	}
 
 	void Cleanup()
@@ -116,15 +135,12 @@ class HelloTriangleApplication
 			}
 		}
 
-		InstanceCreateInfo createInfo
-		{
-			{},
-			&appInfo,
-			static_cast<uint32_t>(requiredLayers.size()),
-			requiredLayers.data(),
-			static_cast<uint32_t>(requiredExtensions.size()),
-			requiredExtensions.data()
-		};
+		InstanceCreateInfo createInfo{};
+		createInfo.pApplicationInfo = &appInfo;
+		createInfo.enabledLayerCount = static_cast<uint32_t>(requiredLayers.size());
+		createInfo.ppEnabledLayerNames = requiredLayers.data();
+		createInfo.enabledExtensionCount = static_cast<uint32_t>(requiredExtensions.size());
+		createInfo.ppEnabledExtensionNames = requiredExtensions.data();
 
 		instance = raii::Instance{ context, createInfo };
 	}
@@ -135,13 +151,12 @@ class HelloTriangleApplication
 
 		DebugUtilsMessageSeverityFlagsEXT severityFlags(DebugUtilsMessageSeverityFlagBitsEXT::eVerbose | DebugUtilsMessageSeverityFlagBitsEXT::eWarning | DebugUtilsMessageSeverityFlagBitsEXT::eError);
 		DebugUtilsMessageTypeFlagsEXT messageTypeFlags(DebugUtilsMessageTypeFlagBitsEXT::eGeneral | DebugUtilsMessageTypeFlagBitsEXT::ePerformance | DebugUtilsMessageTypeFlagBitsEXT::eValidation);
-		DebugUtilsMessengerCreateInfoEXT debugUtilsMessengerCreateInfoEXT
-		{
-			{},
-			severityFlags,
-			messageTypeFlags,
-			&DebugCallback
-		};
+
+		DebugUtilsMessengerCreateInfoEXT debugUtilsMessengerCreateInfoEXT{};
+		debugUtilsMessengerCreateInfoEXT.messageSeverity = severityFlags;
+		debugUtilsMessengerCreateInfoEXT.messageType = messageTypeFlags;
+		debugUtilsMessengerCreateInfoEXT.pfnUserCallback = &DebugCallback;
+
 		debugMessenger = instance.createDebugUtilsMessengerEXT(debugUtilsMessengerCreateInfoEXT);
 	}
 
@@ -183,8 +198,11 @@ class HelloTriangleApplication
 					}
 				);
 
-				auto features = device.template getFeatures2<PhysicalDeviceFeatures2, PhysicalDeviceVulkan13Features, PhysicalDeviceExtendedDynamicStateFeaturesEXT>();
-				bool supportsRequiredFeatures = features.template get<PhysicalDeviceVulkan13Features>().dynamicRendering &&
+				auto features = device.template getFeatures2<PhysicalDeviceFeatures2, PhysicalDeviceVulkan11Features, PhysicalDeviceVulkan13Features, PhysicalDeviceExtendedDynamicStateFeaturesEXT>();
+				bool supportsRequiredFeatures =
+					features.template get<PhysicalDeviceVulkan11Features>().shaderDrawParameters &&
+					features.template get<PhysicalDeviceVulkan13Features>().synchronization2 &&
+					features.template get<PhysicalDeviceVulkan13Features>().dynamicRendering &&
 					features.template get<PhysicalDeviceExtendedDynamicStateFeaturesEXT>().extendedDynamicState;
 
 				return supportsVulkan1_3 && supportsGraphics && supportsAllRequiredExtensions && supportsRequiredFeatures;
@@ -197,32 +215,42 @@ class HelloTriangleApplication
 	void CreateLogicalDevice()
 	{
 		vector<QueueFamilyProperties> queueFamilyProperties = physicalDevice.getQueueFamilyProperties();
-		auto graphicsQueueFamilyProperty = ranges::find_if(queueFamilyProperties, [](const QueueFamilyProperties& qfp) { return (qfp.queueFlags & QueueFlagBits::eGraphics) != static_cast<QueueFlags>(0); });
-		assert(graphicsQueueFamilyProperty != queueFamilyProperties.end() && "No graphics queue family found!");
 
-		uint32_t graphicsIndex = static_cast<uint32_t>(distance(queueFamilyProperties.begin(), graphicsQueueFamilyProperty));
+		for (uint32_t qfpIndex = 0; qfpIndex < queueFamilyProperties.size(); qfpIndex++)
+		{
+			if ((queueFamilyProperties[qfpIndex].queueFlags & QueueFlagBits::eGraphics) && physicalDevice.getSurfaceSupportKHR(qfpIndex, *surface))
+			{
+				queueIndex = qfpIndex;
+				break;
+			}
+		}
+		if (queueIndex == ~0) throw runtime_error("Could not find a queue for graphics and present -> terminating");
 
 		PhysicalDeviceFeatures2 featureChain = {};
+
+		PhysicalDeviceVulkan11Features vulkan11Features = {};
+		vulkan11Features.shaderDrawParameters = true;
+
 		PhysicalDeviceVulkan13Features vulkan13Features = {};
+		vulkan13Features.synchronization2 = true;
 		vulkan13Features.dynamicRendering = true;
+
 		PhysicalDeviceExtendedDynamicStateFeaturesEXT extendedDynamicStateFeatures = {};
 		extendedDynamicStateFeatures.extendedDynamicState = true;
 
-		StructureChain<PhysicalDeviceFeatures2, PhysicalDeviceVulkan13Features, PhysicalDeviceExtendedDynamicStateFeaturesEXT> featureStructureChain
+		StructureChain<PhysicalDeviceFeatures2, PhysicalDeviceVulkan11Features, PhysicalDeviceVulkan13Features, PhysicalDeviceExtendedDynamicStateFeaturesEXT> featureStructureChain
 		{
 			featureChain,
+			vulkan11Features,
 			vulkan13Features,
 			extendedDynamicStateFeatures
 		};
 
 		constexpr float queuePriority = 0.5f;
-		DeviceQueueCreateInfo queueCreateInfo
-		{
-			{},
-			graphicsIndex,
-			1,
-			&queuePriority
-		};
+		DeviceQueueCreateInfo queueCreateInfo = {};
+		queueCreateInfo.queueFamilyIndex = queueIndex;
+		queueCreateInfo.queueCount = 1;
+		queueCreateInfo.pQueuePriorities = &queuePriority;
 
 		DeviceCreateInfo createInfo = {};
 		createInfo.pNext = &featureStructureChain.get<PhysicalDeviceFeatures2>();
@@ -232,7 +260,7 @@ class HelloTriangleApplication
 		createInfo.ppEnabledExtensionNames = requiredDeviceExtension.data();
 
 		device = raii::Device{ physicalDevice, createInfo };
-		graphicsQueue = raii::Queue{ device, graphicsIndex, 0 };
+		queue = raii::Queue{ device, queueIndex, 0 };
 	}
 
 	void CreateSwapChain()
@@ -241,24 +269,19 @@ class HelloTriangleApplication
 		swapChainExtent = ChooseSwapExtent(surfaceCapabilities);
 		swapChainSurfaceFormat = ChooseSwapSurfaceFormat(physicalDevice.getSurfaceFormatsKHR(*surface));
 
-		SwapchainCreateInfoKHR swapChainCreateInfo
-		{
-			{},
-			*surface,
-			ChooseSwapMinImageCount(surfaceCapabilities),
-			swapChainSurfaceFormat.format,
-			swapChainSurfaceFormat.colorSpace,
-			swapChainExtent,
-			1,
-			ImageUsageFlagBits::eColorAttachment,
-			SharingMode::eExclusive,
-			0,
-			nullptr,
-			surfaceCapabilities.currentTransform,
-			CompositeAlphaFlagBitsKHR::eOpaque,
-			ChooseSwapPresentMode(physicalDevice.getSurfacePresentModesKHR(*surface)),
-			true
-		};
+		SwapchainCreateInfoKHR swapChainCreateInfo{};
+		swapChainCreateInfo.surface = *surface;
+		swapChainCreateInfo.minImageCount = ChooseSwapMinImageCount(surfaceCapabilities);
+		swapChainCreateInfo.imageFormat = swapChainSurfaceFormat.format;
+		swapChainCreateInfo.imageColorSpace = swapChainSurfaceFormat.colorSpace;
+		swapChainCreateInfo.imageExtent = swapChainExtent;
+		swapChainCreateInfo.imageArrayLayers = 1;
+		swapChainCreateInfo.imageUsage = ImageUsageFlagBits::eColorAttachment;
+		swapChainCreateInfo.imageSharingMode = SharingMode::eExclusive;
+		swapChainCreateInfo.preTransform = surfaceCapabilities.currentTransform;
+		swapChainCreateInfo.compositeAlpha = CompositeAlphaFlagBitsKHR::eOpaque;
+		swapChainCreateInfo.presentMode = ChooseSwapPresentMode(physicalDevice.getSurfacePresentModesKHR(*surface));
+		swapChainCreateInfo.clipped = true;
 
 		swapChain = raii::SwapchainKHR{ device, swapChainCreateInfo };
 		swapChainImages = swapChain.getImages();
@@ -267,15 +290,15 @@ class HelloTriangleApplication
 	void CreateImageViews()
 	{
 		assert(swapChainImageViews.empty());
-		ImageViewCreateInfo imageViewCreateInfo
-		{
-			{},
-			{},
-			ImageViewType::e2D,
-			swapChainSurfaceFormat.format,
-			ComponentMapping{},
-			ImageSubresourceRange{ ImageAspectFlagBits::eColor, 0, 1, 0, 1 }
-		};
+
+		ImageViewCreateInfo imageViewCreateInfo{};
+		imageViewCreateInfo.viewType = ImageViewType::e2D;
+		imageViewCreateInfo.format = swapChainSurfaceFormat.format;
+		imageViewCreateInfo.subresourceRange.aspectMask = ImageAspectFlagBits::eColor;
+		imageViewCreateInfo.subresourceRange.baseMipLevel = 0;
+		imageViewCreateInfo.subresourceRange.levelCount = 1;
+		imageViewCreateInfo.subresourceRange.baseArrayLayer = 0;
+		imageViewCreateInfo.subresourceRange.layerCount = 1;
 
 		for (const auto& image : swapChainImages)
 		{
@@ -286,7 +309,266 @@ class HelloTriangleApplication
 
 	void CreateGraphicsPipeline()
 	{
+		raii::ShaderModule shaderModule = CreateShaderModule(ReadFile("Shader/Slang.spv"));
 
+		PipelineShaderStageCreateInfo vertShaderStageInfo{};
+		vertShaderStageInfo.stage = ShaderStageFlagBits::eVertex;
+		vertShaderStageInfo.module = shaderModule;
+		vertShaderStageInfo.pName = "vertMain";
+
+		PipelineShaderStageCreateInfo fragShaderStageInfo{};
+		fragShaderStageInfo.stage = ShaderStageFlagBits::eFragment;
+		fragShaderStageInfo.module = shaderModule;
+		fragShaderStageInfo.pName = "fragMain";
+
+		array<PipelineShaderStageCreateInfo, 2> shaderStages = { vertShaderStageInfo, fragShaderStageInfo };
+
+		PipelineVertexInputStateCreateInfo vertexInputInfo{};
+
+		PipelineInputAssemblyStateCreateInfo inputAssembly{};
+		inputAssembly.topology = PrimitiveTopology::eTriangleList;
+
+		PipelineViewportStateCreateInfo viewportState{};
+		viewportState.viewportCount = 1;
+		viewportState.scissorCount = 1;
+
+		PipelineRasterizationStateCreateInfo rasterizer{};
+		rasterizer.depthClampEnable = False;
+		rasterizer.rasterizerDiscardEnable = False;
+		rasterizer.polygonMode = PolygonMode::eFill;
+		rasterizer.cullMode = CullModeFlagBits::eBack;
+		rasterizer.frontFace = FrontFace::eClockwise;
+		rasterizer.depthBiasEnable = False;
+		rasterizer.depthBiasSlopeFactor = 1.0f;
+		rasterizer.lineWidth = 1.0f;
+
+		PipelineMultisampleStateCreateInfo multisampling{};
+		multisampling.rasterizationSamples = SampleCountFlagBits::e1;
+		multisampling.sampleShadingEnable = False;
+
+		PipelineColorBlendAttachmentState colorBlendAttachment{};
+		colorBlendAttachment.blendEnable = False;
+		colorBlendAttachment.colorWriteMask =
+			ColorComponentFlagBits::eR |
+			ColorComponentFlagBits::eG |
+			ColorComponentFlagBits::eB |
+			ColorComponentFlagBits::eA;
+
+		PipelineColorBlendStateCreateInfo colorBlending{};
+		colorBlending.logicOpEnable = False;
+		colorBlending.logicOp = LogicOp::eCopy;
+		colorBlending.attachmentCount = 1;
+		colorBlending.pAttachments = &colorBlendAttachment;
+
+		vector dynamicStates = { DynamicState::eViewport, DynamicState::eScissor };
+
+		PipelineDynamicStateCreateInfo dynamicState{};
+		dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+		dynamicState.pDynamicStates = dynamicStates.data();
+
+		PipelineLayoutCreateInfo pipelineLayoutInfo{};
+		pipelineLayoutInfo.setLayoutCount = 0;
+		pipelineLayoutInfo.pushConstantRangeCount = 0;
+
+		pipelineLayout = raii::PipelineLayout{ device, pipelineLayoutInfo };
+
+		GraphicsPipelineCreateInfo graphicsPipelineCreateInfo{};
+		graphicsPipelineCreateInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
+		graphicsPipelineCreateInfo.pStages = shaderStages.data();
+		graphicsPipelineCreateInfo.pVertexInputState = &vertexInputInfo;
+		graphicsPipelineCreateInfo.pInputAssemblyState = &inputAssembly;
+		graphicsPipelineCreateInfo.pViewportState = &viewportState;
+		graphicsPipelineCreateInfo.pRasterizationState = &rasterizer;
+		graphicsPipelineCreateInfo.pMultisampleState = &multisampling;
+		graphicsPipelineCreateInfo.pColorBlendState = &colorBlending;
+		graphicsPipelineCreateInfo.pDynamicState = &dynamicState;
+		graphicsPipelineCreateInfo.layout = pipelineLayout;
+
+		PipelineRenderingCreateInfo pipelineRenderingCreateInfo{};
+		pipelineRenderingCreateInfo.colorAttachmentCount = 1;
+		pipelineRenderingCreateInfo.pColorAttachmentFormats = &swapChainSurfaceFormat.format;
+
+		StructureChain<GraphicsPipelineCreateInfo, PipelineRenderingCreateInfo> pipelineCreateInfoChain
+		{
+			graphicsPipelineCreateInfo,
+			pipelineRenderingCreateInfo
+		};
+
+		graphicsPipeline = raii::Pipeline{ device, nullptr, pipelineCreateInfoChain.get<GraphicsPipelineCreateInfo>() };
+	}
+
+	void CreateCommandPool()
+	{
+		CommandPoolCreateInfo poolInfo{};
+		poolInfo.flags = CommandPoolCreateFlagBits::eResetCommandBuffer;
+		poolInfo.queueFamilyIndex = queueIndex;
+
+		commandPool = raii::CommandPool{ device, poolInfo };
+	}
+
+	void CreateCommandBuffer()
+	{
+		CommandBufferAllocateInfo allocInfo{};
+		allocInfo.commandPool = commandPool;
+		allocInfo.level = CommandBufferLevel::ePrimary;
+		allocInfo.commandBufferCount = 1;
+
+		commandBuffer = move(raii::CommandBuffers{ device, allocInfo }.front());
+	}
+
+	void RecordCommandBuffer(uint32_t imageIndex)
+	{
+		commandBuffer.begin(CommandBufferBeginInfo{});
+
+		TransitionImageLayout
+		(
+			imageIndex,
+			ImageLayout::eUndefined,
+			ImageLayout::eColorAttachmentOptimal,
+			{},
+			AccessFlagBits2::eColorAttachmentWrite,
+			PipelineStageFlagBits2::eTopOfPipe,
+			PipelineStageFlagBits2::eColorAttachmentOutput
+		);
+
+		ClearValue clearColor = ClearColorValue{ array<float, 4>{ 0.2f, 0.2f, 0.2f, 1.0f } };
+
+		RenderingAttachmentInfo colorAttachmentInfo{};
+		colorAttachmentInfo.imageView = *swapChainImageViews[imageIndex];
+		colorAttachmentInfo.imageLayout = ImageLayout::eColorAttachmentOptimal;
+		colorAttachmentInfo.loadOp = AttachmentLoadOp::eClear;
+		colorAttachmentInfo.storeOp = AttachmentStoreOp::eStore;
+		colorAttachmentInfo.clearValue = clearColor;
+
+		RenderingInfo renderingInfo{};
+		renderingInfo.renderArea.offset = Offset2D{ 0, 0 };
+		renderingInfo.renderArea.extent = swapChainExtent;
+		renderingInfo.layerCount = 1;
+		renderingInfo.colorAttachmentCount = 1;
+		renderingInfo.pColorAttachments = &colorAttachmentInfo;
+
+		commandBuffer.beginRendering(renderingInfo);
+
+		commandBuffer.bindPipeline(PipelineBindPoint::eGraphics, *graphicsPipeline);
+		commandBuffer.setViewport(0, Viewport{ 0.0f, 0.0f, static_cast<float>(swapChainExtent.width), static_cast<float>(swapChainExtent.height), 0.0f, 1.0f });
+		commandBuffer.setScissor(0, Rect2D{ Offset2D{ 0, 0 }, swapChainExtent });
+		commandBuffer.draw(3, 1, 0, 0);
+
+		commandBuffer.endRendering();
+
+		TransitionImageLayout
+		(
+			imageIndex,
+			ImageLayout::eColorAttachmentOptimal,
+			ImageLayout::ePresentSrcKHR,
+			AccessFlagBits2::eColorAttachmentWrite,
+			{},
+			PipelineStageFlagBits2::eColorAttachmentOutput,
+			PipelineStageFlagBits2::eBottomOfPipe
+		);
+
+		commandBuffer.end();
+	}
+
+	void TransitionImageLayout
+	(
+		uint32_t imageIndex,
+		ImageLayout oldLayout,
+		ImageLayout newLayout,
+		AccessFlags2 srcAccessMask,
+		AccessFlags2 dstAccessMask,
+		PipelineStageFlags2 srcStageMask,
+		PipelineStageFlags2 dstStageMask
+	)
+	{
+		ImageMemoryBarrier2 barrier{};
+		barrier.srcStageMask = srcStageMask;
+		barrier.srcAccessMask = srcAccessMask;
+		barrier.dstStageMask = dstStageMask;
+		barrier.dstAccessMask = dstAccessMask;
+		barrier.oldLayout = oldLayout;
+		barrier.newLayout = newLayout;
+		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.image = swapChainImages[imageIndex];
+		barrier.subresourceRange.aspectMask = ImageAspectFlagBits::eColor;
+		barrier.subresourceRange.baseMipLevel = 0;
+		barrier.subresourceRange.levelCount = 1;
+		barrier.subresourceRange.baseArrayLayer = 0;
+		barrier.subresourceRange.layerCount = 1;
+
+		DependencyInfo dependencyInfo{};
+		dependencyInfo.imageMemoryBarrierCount = 1;
+		dependencyInfo.pImageMemoryBarriers = &barrier;
+		commandBuffer.pipelineBarrier2(dependencyInfo);
+	}
+
+	void CreateSyncObjects()
+	{
+		SemaphoreCreateInfo semaphoreInfo{};
+		presentCompleteSemaphore = raii::Semaphore{ device, semaphoreInfo };
+		renderFinishedSemaphore = raii::Semaphore{ device, semaphoreInfo };
+
+		FenceCreateInfo fenceInfo{};
+		fenceInfo.flags = FenceCreateFlagBits::eSignaled;
+		drawFence = raii::Fence{ device, fenceInfo };
+	}
+
+	void DrawFrame()
+	{
+		queue.waitIdle();
+
+		auto [result, imageIndex] = swapChain.acquireNextImage(UINT64_MAX, *presentCompleteSemaphore, nullptr);
+		RecordCommandBuffer(imageIndex);
+
+		device.resetFences(*drawFence);
+		PipelineStageFlags waitDestinationStageMask = PipelineStageFlagBits::eColorAttachmentOutput;
+
+		SubmitInfo submitInfo{};
+		submitInfo.waitSemaphoreCount = 1;
+		submitInfo.pWaitSemaphores = &*presentCompleteSemaphore;
+		submitInfo.pWaitDstStageMask = &waitDestinationStageMask;
+		submitInfo.commandBufferCount = 1;
+		submitInfo.pCommandBuffers = &*commandBuffer;
+		submitInfo.signalSemaphoreCount = 1;
+		submitInfo.pSignalSemaphores = &*renderFinishedSemaphore;
+
+		queue.submit(submitInfo, *drawFence);
+
+		while (Result::eTimeout == device.waitForFences(*drawFence, True, UINT64_MAX));
+
+		PresentInfoKHR presentInfoKHR{};
+		presentInfoKHR.waitSemaphoreCount = 1;
+		presentInfoKHR.pWaitSemaphores = &*renderFinishedSemaphore;
+		presentInfoKHR.swapchainCount = 1;
+		presentInfoKHR.pSwapchains = &*swapChain;
+		presentInfoKHR.pImageIndices = &imageIndex;
+
+		result = queue.presentKHR(presentInfoKHR);
+
+		switch (result)
+		{
+		case Result::eSuccess:
+			break;
+
+		case Result::eSuboptimalKHR:
+			cout << "vk::Queue::presentKHR returned vk::Result::eSuboptimalKHR !\n";
+			break;
+
+		default:
+			break;
+		}
+	}
+
+	[[nodiscard]] raii::ShaderModule CreateShaderModule(const vector<char>& code) const
+	{
+		ShaderModuleCreateInfo createInfo{};
+		createInfo.codeSize = code.size();
+		createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data());
+
+		raii::ShaderModule shaderModule{ device, createInfo };
+
+		return shaderModule;
 	}
 
 	static uint32_t ChooseSwapMinImageCount(SurfaceCapabilitiesKHR const& surfaceCapabilities)
@@ -353,6 +635,19 @@ class HelloTriangleApplication
 		}
 
 		return False;
+	}
+
+	static vector<char> ReadFile(const string& filename)
+	{
+		ifstream file(filename, ios::ate | ios::binary);
+		if (!file.is_open()) throw runtime_error("failed to open file: " + filename);
+
+		vector<char> buffer(file.tellg());
+		file.seekg(0, ios::beg);
+		file.read(buffer.data(), static_cast<streamsize>(buffer.size()));
+		file.close();
+
+		return buffer;
 	}
 
 public:
