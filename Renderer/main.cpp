@@ -17,12 +17,13 @@ using namespace vk;
 
 constexpr uint32_t WIDTH = 800;
 constexpr uint32_t HEIGHT = 600;
+constexpr int MAX_FRAMES_IN_FLIGHT = 2;
 
 const vector<const char*> validationLayers = { "VK_LAYER_KHRONOS_validation" };
 #ifdef NDEBUG
-constexpr bool enableValidationLayers = false;
+constexpr bool ENABLE_VALIDATION_LAYERS = false;
 #else
-constexpr bool enableValidationLayers = true;
+constexpr bool ENABLE_VALIDATION_LAYERS = true;
 #endif
 
 class HelloTriangleApplication
@@ -56,8 +57,10 @@ class HelloTriangleApplication
 
 	raii::PipelineLayout pipelineLayout = nullptr;
 	raii::Pipeline graphicsPipeline = nullptr;
+
 	raii::CommandPool commandPool = nullptr;
 	raii::CommandBuffer commandBuffer = nullptr;
+
 	raii::Semaphore presentCompleteSemaphore = nullptr;
 	raii::Semaphore renderFinishedSemaphore = nullptr;
 	raii::Fence drawFence = nullptr;
@@ -114,7 +117,7 @@ class HelloTriangleApplication
 		};
 
 		vector<const char*> requiredLayers;
-		if (enableValidationLayers) requiredLayers.assign(validationLayers.begin(), validationLayers.end());
+		if (ENABLE_VALIDATION_LAYERS) requiredLayers.assign(validationLayers.begin(), validationLayers.end());
 
 		vector<LayerProperties> layerProperties = context.enumerateInstanceLayerProperties();
 		for (const char* requiredLayer : requiredLayers)
@@ -147,7 +150,7 @@ class HelloTriangleApplication
 
 	void SetupDebugMessenger()
 	{
-		if (!enableValidationLayers) return;
+		if (!ENABLE_VALIDATION_LAYERS) return;
 
 		DebugUtilsMessageSeverityFlagsEXT severityFlags(DebugUtilsMessageSeverityFlagBitsEXT::eVerbose | DebugUtilsMessageSeverityFlagBitsEXT::eWarning | DebugUtilsMessageSeverityFlagBitsEXT::eError);
 		DebugUtilsMessageTypeFlagsEXT messageTypeFlags(DebugUtilsMessageTypeFlagBitsEXT::eGeneral | DebugUtilsMessageTypeFlagBitsEXT::ePerformance | DebugUtilsMessageTypeFlagBitsEXT::eValidation);
@@ -616,7 +619,7 @@ class HelloTriangleApplication
 		const char** glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
 		vector<const char*> extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
 
-		if (enableValidationLayers) extensions.push_back(EXTDebugUtilsExtensionName);
+		if (ENABLE_VALIDATION_LAYERS) extensions.push_back(EXTDebugUtilsExtensionName);
 
 		return extensions;
 	}
