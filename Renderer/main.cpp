@@ -59,11 +59,13 @@ class HelloTriangleApplication
 	raii::Pipeline graphicsPipeline = nullptr;
 
 	raii::CommandPool commandPool = nullptr;
-	raii::CommandBuffer commandBuffer = nullptr;
+	vector<raii::CommandBuffer> commandBuffers;
 
-	raii::Semaphore presentCompleteSemaphore = nullptr;
-	raii::Semaphore renderFinishedSemaphore = nullptr;
-	raii::Fence drawFence = nullptr;
+	vector<raii::Semaphore> presentCompleteSemaphore;
+	vector<raii::Semaphore> renderFinishedSemaphore;
+	vector<raii::Fence> inFlightFences;
+	uint32_t semaphoreIndex = 0;
+	uint32_t currentFrame = 0;
 
 	void InitWindow()
 	{
@@ -414,14 +416,14 @@ class HelloTriangleApplication
 		CommandBufferAllocateInfo allocInfo{};
 		allocInfo.commandPool = commandPool;
 		allocInfo.level = CommandBufferLevel::ePrimary;
-		allocInfo.commandBufferCount = 1;
+		allocInfo.commandBufferCount = MAX_FRAMES_IN_FLIGHT;
 
-		commandBuffer = move(raii::CommandBuffers{ device, allocInfo }.front());
+		commandBuffers = raii::CommandBuffers{ device, allocInfo };
 	}
 
 	void RecordCommandBuffer(uint32_t imageIndex)
 	{
-		commandBuffer.begin(CommandBufferBeginInfo{});
+		commandBuffers[currentFrame].begin(CommandBufferBeginInfo{});
 
 		TransitionImageLayout
 		(
@@ -434,7 +436,7 @@ class HelloTriangleApplication
 			PipelineStageFlagBits2::eColorAttachmentOutput
 		);
 
-		ClearValue clearColor = ClearColorValue{ array<float, 4>{ 0.2f, 0.2f, 0.2f, 1.0f } };
+		const ClearValue clearColor = ClearColorValue{ array<float, 4>{ 0.2f, 0.2f, 0.2f, 1.0f } };
 
 		RenderingAttachmentInfo colorAttachmentInfo{};
 		colorAttachmentInfo.imageView = *swapChainImageViews[imageIndex];
@@ -450,14 +452,14 @@ class HelloTriangleApplication
 		renderingInfo.colorAttachmentCount = 1;
 		renderingInfo.pColorAttachments = &colorAttachmentInfo;
 
-		commandBuffer.beginRendering(renderingInfo);
+		commandBuffers[currentFrame].beginRendering(renderingInfo);
 
-		commandBuffer.bindPipeline(PipelineBindPoint::eGraphics, *graphicsPipeline);
-		commandBuffer.setViewport(0, Viewport{ 0.0f, 0.0f, static_cast<float>(swapChainExtent.width), static_cast<float>(swapChainExtent.height), 0.0f, 1.0f });
-		commandBuffer.setScissor(0, Rect2D{ Offset2D{ 0, 0 }, swapChainExtent });
-		commandBuffer.draw(3, 1, 0, 0);
+		commandBuffers[currentFrame].bindPipeline(PipelineBindPoint::eGraphics, *graphicsPipeline);
+		commandBuffers[currentFrame].setViewport(0, Viewport{ 0.0f, 0.0f, static_cast<float>(swapChainExtent.width), static_cast<float>(swapChainExtent.height), 0.0f, 1.0f });
+		commandBuffers[currentFrame].setScissor(0, Rect2D{ Offset2D{ 0, 0 }, swapChainExtent });
+		commandBuffers[currentFrame].draw(3, 1, 0, 0);
 
-		commandBuffer.endRendering();
+		commandBuffers[currentFrame].endRendering();
 
 		TransitionImageLayout
 		(
@@ -470,7 +472,7 @@ class HelloTriangleApplication
 			PipelineStageFlagBits2::eBottomOfPipe
 		);
 
-		commandBuffer.end();
+		commandBuffers[currentFrame].end();
 	}
 
 	void TransitionImageLayout
@@ -503,64 +505,72 @@ class HelloTriangleApplication
 		DependencyInfo dependencyInfo{};
 		dependencyInfo.imageMemoryBarrierCount = 1;
 		dependencyInfo.pImageMemoryBarriers = &barrier;
-		commandBuffer.pipelineBarrier2(dependencyInfo);
+		commandBuffers[currentFrame].pipelineBarrier2(dependencyInfo);
 	}
 
 	void CreateSyncObjects()
 	{
-		SemaphoreCreateInfo semaphoreInfo{};
-		presentCompleteSemaphore = raii::Semaphore{ device, semaphoreInfo };
-		renderFinishedSemaphore = raii::Semaphore{ device, semaphoreInfo };
+		presentCompleteSemaphore.clear();
+		renderFinishedSemaphore.clear();
+		inFlightFences.clear();
+
+		for (size_t i = 0; i < swapChainImages.size(); i++)
+		{
+			presentCompleteSemaphore.emplace_back(device, SemaphoreCreateInfo{});
+			renderFinishedSemaphore.emplace_back(device, SemaphoreCreateInfo{});
+		}
 
 		FenceCreateInfo fenceInfo{};
 		fenceInfo.flags = FenceCreateFlagBits::eSignaled;
-		drawFence = raii::Fence{ device, fenceInfo };
+
+		for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) inFlightFences.emplace_back(device, fenceInfo);
 	}
 
 	void DrawFrame()
 	{
-		queue.waitIdle();
+		while (device.waitForFences(*inFlightFences[currentFrame], True, UINT64_MAX) == Result::eTimeout);
 
-		auto [result, imageIndex] = swapChain.acquireNextImage(UINT64_MAX, *presentCompleteSemaphore, nullptr);
+		auto [result, imageIndex] = swapChain.acquireNextImage(UINT64_MAX, *presentCompleteSemaphore[semaphoreIndex], nullptr);
+
+		device.resetFences(*inFlightFences[currentFrame]);
+		commandBuffers[currentFrame].reset();
 		RecordCommandBuffer(imageIndex);
 
-		device.resetFences(*drawFence);
 		PipelineStageFlags waitDestinationStageMask = PipelineStageFlagBits::eColorAttachmentOutput;
 
 		SubmitInfo submitInfo{};
 		submitInfo.waitSemaphoreCount = 1;
-		submitInfo.pWaitSemaphores = &*presentCompleteSemaphore;
+		submitInfo.pWaitSemaphores = &*presentCompleteSemaphore[semaphoreIndex];
 		submitInfo.pWaitDstStageMask = &waitDestinationStageMask;
 		submitInfo.commandBufferCount = 1;
-		submitInfo.pCommandBuffers = &*commandBuffer;
+		submitInfo.pCommandBuffers = &*commandBuffers[currentFrame];
 		submitInfo.signalSemaphoreCount = 1;
-		submitInfo.pSignalSemaphores = &*renderFinishedSemaphore;
-
-		queue.submit(submitInfo, *drawFence);
-
-		while (Result::eTimeout == device.waitForFences(*drawFence, True, UINT64_MAX));
+		submitInfo.pSignalSemaphores = &*renderFinishedSemaphore[imageIndex];
+		queue.submit(submitInfo, *inFlightFences[currentFrame]);
 
 		PresentInfoKHR presentInfoKHR{};
 		presentInfoKHR.waitSemaphoreCount = 1;
-		presentInfoKHR.pWaitSemaphores = &*renderFinishedSemaphore;
+		presentInfoKHR.pWaitSemaphores = &*renderFinishedSemaphore[imageIndex];
 		presentInfoKHR.swapchainCount = 1;
 		presentInfoKHR.pSwapchains = &*swapChain;
 		presentInfoKHR.pImageIndices = &imageIndex;
-
 		result = queue.presentKHR(presentInfoKHR);
-
+		
 		switch (result)
 		{
-		case Result::eSuccess:
-			break;
+			case Result::eSuccess:
+				break;
 
-		case Result::eSuboptimalKHR:
-			cout << "vk::Queue::presentKHR returned vk::Result::eSuboptimalKHR !\n";
-			break;
+			case Result::eSuboptimalKHR:
+				cout << "swap chain is suboptimal!" << endl;
+				break;
 
-		default:
-			break;
+			default:
+				throw runtime_error("failed to present swap chain image!");
 		}
+
+		semaphoreIndex = (semaphoreIndex + 1) % presentCompleteSemaphore.size();
+		currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 	}
 
 	[[nodiscard]] raii::ShaderModule CreateShaderModule(const vector<char>& code) const
