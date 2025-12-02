@@ -52,7 +52,7 @@ class HelloTriangleApplication
 	const bool ENABLE_VALIDATION_LAYERS = true;
 #endif
 
-	// Needs custom deleter because GLFW is a C library
+	// Needs custom deleter because GLFW is a C library // atleast if you want this to be raii compliant
 	unique_ptr<GLFWwindow, decltype(&glfwDestroyWindow)> m_window{ nullptr, glfwDestroyWindow };
 
 	raii::Context m_context{};
@@ -110,7 +110,7 @@ class HelloTriangleApplication
 
 	static void FramebufferResizeCallback(GLFWwindow* window, int width, int height)
 	{
-		auto app = reinterpret_cast<HelloTriangleApplication*>(glfwGetWindowUserPointer(window));
+		auto app = static_cast<HelloTriangleApplication*>(glfwGetWindowUserPointer(window));
 
 		app->m_width = width;
 		app->m_height = height;
@@ -493,23 +493,61 @@ class HelloTriangleApplication
 
 	void CreateVertexBuffer()
 	{
-		BufferCreateInfo bufferInfo{};
-		bufferInfo.size = sizeof(vertices[0]) * vertices.size();
-		bufferInfo.usage = BufferUsageFlagBits::eVertexBuffer;
-		bufferInfo.sharingMode = SharingMode::eExclusive;
-		m_vertexBuffer = raii::Buffer{ m_device, bufferInfo };
+		BufferCreateInfo stagingBufferInfo{};
+		stagingBufferInfo.size = sizeof(vertices[0]) * vertices.size();
+		stagingBufferInfo.usage = BufferUsageFlagBits::eTransferSrc;
+		stagingBufferInfo.sharingMode = SharingMode::eExclusive;
+		raii::Buffer stagingBuffer = raii::Buffer{ m_device, stagingBufferInfo };
+
+		MemoryRequirements memRequirementsStaging = stagingBuffer.getMemoryRequirements();
+
+		MemoryAllocateInfo memoryAllocateInfoStaging{};
+		memoryAllocateInfoStaging.allocationSize = memRequirementsStaging.size;
+		memoryAllocateInfoStaging.memoryTypeIndex = FindMemoryType(memRequirementsStaging.memoryTypeBits, MemoryPropertyFlagBits::eHostVisible | MemoryPropertyFlagBits::eHostCoherent);
+		raii::DeviceMemory stagingBufferMemory = raii::DeviceMemory{ m_device, memoryAllocateInfoStaging };
+
+		stagingBuffer.bindMemory(*stagingBufferMemory, 0);
+		void* dataStaging = stagingBufferMemory.mapMemory(0, stagingBufferInfo.size);
+		memcpy(dataStaging, vertices.data(), stagingBufferInfo.size);
+		stagingBufferMemory.unmapMemory();
+
+		BufferCreateInfo vertexBufferInfo{};
+		vertexBufferInfo.size = sizeof(vertices[0]) * vertices.size();
+		vertexBufferInfo.usage = BufferUsageFlagBits::eVertexBuffer | BufferUsageFlagBits::eTransferDst;
+		vertexBufferInfo.sharingMode = SharingMode::eExclusive;
+		m_vertexBuffer = raii::Buffer{ m_device, vertexBufferInfo };
 
 		MemoryRequirements memRequirements = m_vertexBuffer.getMemoryRequirements();
+		MemoryAllocateInfo memoryAllocateInfo{};
+		memoryAllocateInfo.allocationSize = memRequirements.size;
+		memoryAllocateInfo.memoryTypeIndex = FindMemoryType(memRequirements.memoryTypeBits, MemoryPropertyFlagBits::eDeviceLocal);
+		m_vertexBufferMemory = raii::DeviceMemory{ m_device, memoryAllocateInfo };
 
-		MemoryAllocateInfo allocInfo{};
-		allocInfo.allocationSize = memRequirements.size;
-		allocInfo.memoryTypeIndex = FindMemoryType(memRequirements.memoryTypeBits, MemoryPropertyFlagBits::eHostVisible | MemoryPropertyFlagBits::eHostCoherent);
-		m_vertexBufferMemory = raii::DeviceMemory{ m_device, allocInfo };
 		m_vertexBuffer.bindMemory(*m_vertexBufferMemory, 0);
 
-		void* data = m_vertexBufferMemory.mapMemory(0, bufferInfo.size);
-		memcpy(data, vertices.data(), (size_t)bufferInfo.size);
-		m_vertexBufferMemory.unmapMemory();
+		CopyBuffer(stagingBuffer, m_vertexBuffer, vertexBufferInfo.size);
+	}
+
+	void CopyBuffer(raii::Buffer& srcBuffer, raii::Buffer& dstBuffer, VkDeviceSize size)
+	{
+		CommandBufferAllocateInfo allocInfo{};
+		allocInfo.commandPool = m_commandPool;
+		allocInfo.level = CommandBufferLevel::ePrimary;
+		allocInfo.commandBufferCount = 1;
+
+		raii::CommandBuffer commandCopyBuffer = move(m_device.allocateCommandBuffers(allocInfo).front());
+		commandCopyBuffer.begin(CommandBufferBeginInfo{ CommandBufferUsageFlagBits::eOneTimeSubmit });
+
+		BufferCopy copyRegion{};
+		copyRegion.size = size;
+		commandCopyBuffer.copyBuffer(*srcBuffer, *dstBuffer, copyRegion);
+		commandCopyBuffer.end();
+
+		SubmitInfo submitInfo{};
+		submitInfo.commandBufferCount = 1;
+		submitInfo.pCommandBuffers = &*commandCopyBuffer;
+		m_queue.submit(submitInfo, nullptr);
+		m_queue.waitIdle();
 	}
 
 	uint32_t FindMemoryType(uint32_t typeFilter, MemoryPropertyFlags properties)
