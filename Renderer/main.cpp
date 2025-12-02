@@ -4,6 +4,7 @@ import vulkan_hpp;
 #endif
 
 #include <vulkan/vulkan_raii.hpp>
+#include <glm/glm.hpp>
 
 #include <GLFW/glfw3.h>
 
@@ -15,30 +16,53 @@ import vulkan_hpp;
 using namespace std;
 using namespace vk;
 
-constexpr uint32_t WIDTH = 800;
-constexpr uint32_t HEIGHT = 600;
-constexpr int MAX_FRAMES_IN_FLIGHT = 2;
+struct Vertex
+{
+	glm::vec2 pos;
+	glm::vec3 color;
 
-const vector<const char*> validationLayers = { "VK_LAYER_KHRONOS_validation" };
-#ifdef NDEBUG
-constexpr bool ENABLE_VALIDATION_LAYERS = false;
-#else
-constexpr bool ENABLE_VALIDATION_LAYERS = true;
-#endif
+	static VertexInputBindingDescription getBindingDescription() { return { 0, sizeof(Vertex), VertexInputRate::eVertex }; }
+	static array<VertexInputAttributeDescription, 2> getAttributeDescriptions()
+	{
+		return
+		{
+			VertexInputAttributeDescription(0, 0, Format::eR32G32Sfloat, offsetof(Vertex, pos)),
+			VertexInputAttributeDescription(1, 0, Format::eR32G32B32Sfloat, offsetof(Vertex, color))
+		};
+	}
+};
+
+const vector<Vertex> vertices =
+{
+	{ { 0.0f, -0.5f }, { 1.0f, 1.0f, 0.0f } },
+	{ { 0.5f,  0.5f }, { 0.0f, 1.0f, 1.0f } },
+	{ { -0.5f, 0.5f }, { 1.0f, 0.0f, 1.0f } }
+};
 
 class HelloTriangleApplication
 {
+	int m_width = 800;
+	int m_height = 600;
+	const int MAX_FRAMES_IN_FLIGHT = 2;
+
+	const vector<const char*> VALIDATION_LAYERS = { "VK_LAYER_KHRONOS_validation" };
+#ifdef NDEBUG
+	const bool ENABLE_VALIDATION_LAYERS = false;
+#else
+	const bool ENABLE_VALIDATION_LAYERS = true;
+#endif
+
 	// Needs custom deleter because GLFW is a C library
-	unique_ptr<GLFWwindow, decltype(&glfwDestroyWindow)> window{ nullptr, glfwDestroyWindow };
+	unique_ptr<GLFWwindow, decltype(&glfwDestroyWindow)> m_window{ nullptr, glfwDestroyWindow };
 
-	raii::Context context{};
-	raii::Instance instance = nullptr;
-	raii::DebugUtilsMessengerEXT debugMessenger = nullptr;
-	raii::SurfaceKHR surface = nullptr;
-	raii::PhysicalDevice physicalDevice = nullptr;
+	raii::Context m_context{};
+	raii::Instance m_instance = nullptr;
+	raii::DebugUtilsMessengerEXT m_debugMessenger = nullptr;
+	raii::SurfaceKHR m_surface = nullptr;
+	raii::PhysicalDevice m_physicalDevice = nullptr;
 
-	raii::Device device = nullptr;
-	vector<const char*> requiredDeviceExtension =
+	raii::Device m_device = nullptr;
+	vector<const char*> m_requiredDeviceExtension =
 	{
 		KHRSwapchainExtensionName,
 		KHRSpirv14ExtensionName,
@@ -46,45 +70,52 @@ class HelloTriangleApplication
 		KHRCreateRenderpass2ExtensionName
 	};
 
-	raii::Queue queue = nullptr;
-	uint32_t queueIndex = ~0;
+	raii::Queue m_queue = nullptr;
+	uint32_t m_queueIndex = ~0;
 
-	raii::SwapchainKHR swapChain = nullptr;
-	vector<Image> swapChainImages;
-	SurfaceFormatKHR swapChainSurfaceFormat{};
-	Extent2D swapChainExtent{};
-	vector<raii::ImageView> swapChainImageViews;
+	raii::SwapchainKHR m_swapChain = nullptr;
+	vector<Image> m_swapChainImages;
+	SurfaceFormatKHR m_swapChainSurfaceFormat{};
+	Extent2D m_swapChainExtent{};
+	vector<raii::ImageView> m_swapChainImageViews;
 
-	raii::PipelineLayout pipelineLayout = nullptr;
-	raii::Pipeline graphicsPipeline = nullptr;
+	raii::PipelineLayout m_pipelineLayout = nullptr;
+	raii::Pipeline m_graphicsPipeline = nullptr;
 
-	raii::CommandPool commandPool = nullptr;
-	vector<raii::CommandBuffer> commandBuffers;
+	raii::Buffer m_vertexBuffer = nullptr;
+	raii::DeviceMemory m_vertexBufferMemory = nullptr;
 
-	vector<raii::Semaphore> presentCompleteSemaphore;
-	vector<raii::Semaphore> renderFinishedSemaphore;
-	vector<raii::Fence> inFlightFences;
-	uint32_t semaphoreIndex = 0;
-	uint32_t currentFrame = 0;
+	raii::CommandPool m_commandPool = nullptr;
+	vector<raii::CommandBuffer> m_commandBuffers;
 
-	bool framebufferResized = false;
+	vector<raii::Semaphore> m_presentCompleteSemaphore;
+	vector<raii::Semaphore> m_renderFinishedSemaphore;
+	vector<raii::Fence> m_inFlightFences;
+	uint32_t m_semaphoreIndex = 0;
+	uint32_t m_currentFrame = 0;
+
+	bool m_framebufferResized = false;
 
 	void InitWindow()
 	{
 		glfwInit();
 
 		glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-		glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+		glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 
-		window.reset(glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", nullptr, nullptr));
-		glfwSetWindowUserPointer(window.get(), this);
-		glfwSetFramebufferSizeCallback(window.get(), FramebufferResizeCallback);
+		m_window.reset(glfwCreateWindow(m_width, m_height, "Vulkan", nullptr, nullptr));
+		glfwSetWindowUserPointer(m_window.get(), this);
+		glfwSetFramebufferSizeCallback(m_window.get(), FramebufferResizeCallback);
 	}
 
 	static void FramebufferResizeCallback(GLFWwindow* window, int width, int height)
 	{
 		auto app = reinterpret_cast<HelloTriangleApplication*>(glfwGetWindowUserPointer(window));
-		app->framebufferResized = true;
+
+		app->m_width = width;
+		app->m_height = height;
+
+		app->m_framebufferResized = true;
 	}
 
 	void InitVulkan()
@@ -98,25 +129,26 @@ class HelloTriangleApplication
 		CreateImageViews();
 		CreateGraphicsPipeline();
 		CreateCommandPool();
+		CreateVertexBuffer();
 		CreateCommandBuffer();
 		CreateSyncObjects();
 	}
 
 	void MainLoop()
 	{
-		while (!glfwWindowShouldClose(window.get()))
+		while (!glfwWindowShouldClose(m_window.get()))
 		{
 			glfwPollEvents();
 			DrawFrame();
 		}
 
-		device.waitIdle();
+		m_device.waitIdle();
 	}
 
 	void CleanupSwapChain()
 	{
-		swapChainImageViews.clear();
-		swapChain = nullptr;
+		m_swapChainImageViews.clear();
+		m_swapChain = nullptr;
 	}
 
 	void Cleanup()
@@ -126,16 +158,15 @@ class HelloTriangleApplication
 
 	void RecreateSwapChain()
 	{
-		int width = 0, height = 0;
-		glfwGetFramebufferSize(window.get(), &width, &height);
+		glfwGetFramebufferSize(m_window.get(), &m_width, &m_height);
 
-		while (width == 0 || height == 0)
+		while (m_width == 0 || m_height == 0)
 		{
-			glfwGetFramebufferSize(window.get(), &width, &height);
+			glfwGetFramebufferSize(m_window.get(), &m_width, &m_height);
 			glfwWaitEvents();
 		}
 
-		device.waitIdle();
+		m_device.waitIdle();
 
 		CleanupSwapChain();
 		CreateSwapChain();
@@ -154,9 +185,9 @@ class HelloTriangleApplication
 		};
 
 		vector<const char*> requiredLayers;
-		if (ENABLE_VALIDATION_LAYERS) requiredLayers.assign(validationLayers.begin(), validationLayers.end());
+		if (ENABLE_VALIDATION_LAYERS) requiredLayers.assign(VALIDATION_LAYERS.begin(), VALIDATION_LAYERS.end());
 
-		vector<LayerProperties> layerProperties = context.enumerateInstanceLayerProperties();
+		vector<LayerProperties> layerProperties = m_context.enumerateInstanceLayerProperties();
 		for (const char* requiredLayer : requiredLayers)
 		{
 			if (ranges::none_of(layerProperties, [requiredLayer](auto const& layerProperty) { return strcmp(layerProperty.layerName, requiredLayer) == 0; }))
@@ -166,7 +197,7 @@ class HelloTriangleApplication
 		}
 
 		vector<const char*> requiredExtensions = GetRequiredExtensions();
-		vector<ExtensionProperties> extensionProperties = context.enumerateInstanceExtensionProperties();
+		vector<ExtensionProperties> extensionProperties = m_context.enumerateInstanceExtensionProperties();
 		for (const char* requiredExtension : requiredExtensions)
 		{
 			if (ranges::none_of(extensionProperties, [requiredExtension](auto const& extensionProperty) { return strcmp(extensionProperty.extensionName, requiredExtension) == 0; }))
@@ -182,7 +213,7 @@ class HelloTriangleApplication
 		createInfo.enabledExtensionCount = static_cast<uint32_t>(requiredExtensions.size());
 		createInfo.ppEnabledExtensionNames = requiredExtensions.data();
 
-		instance = raii::Instance{ context, createInfo };
+		m_instance = raii::Instance{ m_context, createInfo };
 	}
 
 	void SetupDebugMessenger()
@@ -197,22 +228,22 @@ class HelloTriangleApplication
 		debugUtilsMessengerCreateInfoEXT.messageType = messageTypeFlags;
 		debugUtilsMessengerCreateInfoEXT.pfnUserCallback = &DebugCallback;
 
-		debugMessenger = instance.createDebugUtilsMessengerEXT(debugUtilsMessengerCreateInfoEXT);
+		m_debugMessenger = m_instance.createDebugUtilsMessengerEXT(debugUtilsMessengerCreateInfoEXT);
 	}
 
 	void CreateSurface()
 	{
 		VkSurfaceKHR _surface = nullptr;
-		if (glfwCreateWindowSurface(static_cast<VkInstance>(*instance), window.get(), nullptr, &_surface) != VK_SUCCESS)
+		if (glfwCreateWindowSurface(static_cast<VkInstance>(*m_instance), m_window.get(), nullptr, &_surface) != VK_SUCCESS)
 		{
 			throw runtime_error("failed to create window surface!");
 		}
-		surface = raii::SurfaceKHR{ instance, _surface };
+		m_surface = raii::SurfaceKHR{ m_instance, _surface };
 	}
 
 	void PickPhysicalDevice()
 	{
-		vector<raii::PhysicalDevice> devices = instance.enumeratePhysicalDevices();
+		vector<raii::PhysicalDevice> devices = m_instance.enumeratePhysicalDevices();
 		const auto devIter = ranges::find_if
 		(
 			devices,
@@ -226,7 +257,7 @@ class HelloTriangleApplication
 				vector<ExtensionProperties> availableDeviceExtensions = device.enumerateDeviceExtensionProperties();
 				bool supportsAllRequiredExtensions = ranges::all_of
 				(
-					requiredDeviceExtension, [&availableDeviceExtensions](const char* requiredDeviceExtension)
+					m_requiredDeviceExtension, [&availableDeviceExtensions](const char* requiredDeviceExtension)
 					{
 					return ranges::any_of
 					(
@@ -248,23 +279,23 @@ class HelloTriangleApplication
 				return supportsVulkan1_3 && supportsGraphics && supportsAllRequiredExtensions && supportsRequiredFeatures;
 			}
 		);
-		if (devIter != devices.end()) physicalDevice = *devIter;
+		if (devIter != devices.end()) m_physicalDevice = *devIter;
 		else throw runtime_error("failed to find a suitable GPU!");
 	}
 
 	void CreateLogicalDevice()
 	{
-		vector<QueueFamilyProperties> queueFamilyProperties = physicalDevice.getQueueFamilyProperties();
+		vector<QueueFamilyProperties> queueFamilyProperties = m_physicalDevice.getQueueFamilyProperties();
 
 		for (uint32_t qfpIndex = 0; qfpIndex < queueFamilyProperties.size(); qfpIndex++)
 		{
-			if ((queueFamilyProperties[qfpIndex].queueFlags & QueueFlagBits::eGraphics) && physicalDevice.getSurfaceSupportKHR(qfpIndex, *surface))
+			if ((queueFamilyProperties[qfpIndex].queueFlags & QueueFlagBits::eGraphics) && m_physicalDevice.getSurfaceSupportKHR(qfpIndex, *m_surface))
 			{
-				queueIndex = qfpIndex;
+				m_queueIndex = qfpIndex;
 				break;
 			}
 		}
-		if (queueIndex == ~0) throw runtime_error("Could not find a queue for graphics and present -> terminating");
+		if (m_queueIndex == ~0) throw runtime_error("Could not find a queue for graphics and present -> terminating");
 
 		PhysicalDeviceFeatures2 featureChain = {};
 
@@ -295,7 +326,7 @@ class HelloTriangleApplication
 
 		constexpr float queuePriority = 0.5f;
 		DeviceQueueCreateInfo queueCreateInfo = {};
-		queueCreateInfo.queueFamilyIndex = queueIndex;
+		queueCreateInfo.queueFamilyIndex = m_queueIndex;
 		queueCreateInfo.queueCount = 1;
 		queueCreateInfo.pQueuePriorities = &queuePriority;
 
@@ -303,54 +334,54 @@ class HelloTriangleApplication
 		createInfo.pNext = &featureStructureChain.get<PhysicalDeviceFeatures2>();
 		createInfo.queueCreateInfoCount = 1;
 		createInfo.pQueueCreateInfos = &queueCreateInfo;
-		createInfo.enabledExtensionCount = static_cast<uint32_t>(requiredDeviceExtension.size());
-		createInfo.ppEnabledExtensionNames = requiredDeviceExtension.data();
+		createInfo.enabledExtensionCount = static_cast<uint32_t>(m_requiredDeviceExtension.size());
+		createInfo.ppEnabledExtensionNames = m_requiredDeviceExtension.data();
 
-		device = raii::Device{ physicalDevice, createInfo };
-		queue = raii::Queue{ device, queueIndex, 0 };
+		m_device = raii::Device{ m_physicalDevice, createInfo };
+		m_queue = raii::Queue{ m_device, m_queueIndex, 0 };
 	}
 
 	void CreateSwapChain()
 	{
-		SurfaceCapabilitiesKHR surfaceCapabilities = physicalDevice.getSurfaceCapabilitiesKHR(*surface);
-		swapChainExtent = ChooseSwapExtent(surfaceCapabilities);
-		swapChainSurfaceFormat = ChooseSwapSurfaceFormat(physicalDevice.getSurfaceFormatsKHR(*surface));
+		SurfaceCapabilitiesKHR surfaceCapabilities = m_physicalDevice.getSurfaceCapabilitiesKHR(*m_surface);
+		m_swapChainExtent = ChooseSwapExtent(surfaceCapabilities);
+		m_swapChainSurfaceFormat = ChooseSwapSurfaceFormat(m_physicalDevice.getSurfaceFormatsKHR(*m_surface));
 
 		SwapchainCreateInfoKHR swapChainCreateInfo{};
-		swapChainCreateInfo.surface = *surface;
+		swapChainCreateInfo.surface = *m_surface;
 		swapChainCreateInfo.minImageCount = ChooseSwapMinImageCount(surfaceCapabilities);
-		swapChainCreateInfo.imageFormat = swapChainSurfaceFormat.format;
-		swapChainCreateInfo.imageColorSpace = swapChainSurfaceFormat.colorSpace;
-		swapChainCreateInfo.imageExtent = swapChainExtent;
+		swapChainCreateInfo.imageFormat = m_swapChainSurfaceFormat.format;
+		swapChainCreateInfo.imageColorSpace = m_swapChainSurfaceFormat.colorSpace;
+		swapChainCreateInfo.imageExtent = m_swapChainExtent;
 		swapChainCreateInfo.imageArrayLayers = 1;
 		swapChainCreateInfo.imageUsage = ImageUsageFlagBits::eColorAttachment;
 		swapChainCreateInfo.imageSharingMode = SharingMode::eExclusive;
 		swapChainCreateInfo.preTransform = surfaceCapabilities.currentTransform;
 		swapChainCreateInfo.compositeAlpha = CompositeAlphaFlagBitsKHR::eOpaque;
-		swapChainCreateInfo.presentMode = ChooseSwapPresentMode(physicalDevice.getSurfacePresentModesKHR(*surface));
+		swapChainCreateInfo.presentMode = ChooseSwapPresentMode(m_physicalDevice.getSurfacePresentModesKHR(*m_surface));
 		swapChainCreateInfo.clipped = true;
 
-		swapChain = raii::SwapchainKHR{ device, swapChainCreateInfo };
-		swapChainImages = swapChain.getImages();
+		m_swapChain = raii::SwapchainKHR{ m_device, swapChainCreateInfo };
+		m_swapChainImages = m_swapChain.getImages();
 	}
 
 	void CreateImageViews()
 	{
-		assert(swapChainImageViews.empty());
+		assert(m_swapChainImageViews.empty());
 
 		ImageViewCreateInfo imageViewCreateInfo{};
 		imageViewCreateInfo.viewType = ImageViewType::e2D;
-		imageViewCreateInfo.format = swapChainSurfaceFormat.format;
+		imageViewCreateInfo.format = m_swapChainSurfaceFormat.format;
 		imageViewCreateInfo.subresourceRange.aspectMask = ImageAspectFlagBits::eColor;
 		imageViewCreateInfo.subresourceRange.baseMipLevel = 0;
 		imageViewCreateInfo.subresourceRange.levelCount = 1;
 		imageViewCreateInfo.subresourceRange.baseArrayLayer = 0;
 		imageViewCreateInfo.subresourceRange.layerCount = 1;
 
-		for (const auto& image : swapChainImages)
+		for (const auto& image : m_swapChainImages)
 		{
 			imageViewCreateInfo.image = image;
-			swapChainImageViews.emplace_back(device, imageViewCreateInfo);
+			m_swapChainImageViews.emplace_back(m_device, imageViewCreateInfo);
 		}
 	}
 
@@ -370,7 +401,14 @@ class HelloTriangleApplication
 
 		array<PipelineShaderStageCreateInfo, 2> shaderStages = { vertShaderStageInfo, fragShaderStageInfo };
 
+		VertexInputBindingDescription bindingDescription = Vertex::getBindingDescription();
+		array<VertexInputAttributeDescription, 2> attributeDescriptions = Vertex::getAttributeDescriptions();
+
 		PipelineVertexInputStateCreateInfo vertexInputInfo{};
+		vertexInputInfo.vertexBindingDescriptionCount = 1;
+		vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
+		vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
+		vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
 
 		PipelineInputAssemblyStateCreateInfo inputAssembly{};
 		inputAssembly.topology = PrimitiveTopology::eTriangleList;
@@ -417,7 +455,7 @@ class HelloTriangleApplication
 		pipelineLayoutInfo.setLayoutCount = 0;
 		pipelineLayoutInfo.pushConstantRangeCount = 0;
 
-		pipelineLayout = raii::PipelineLayout{ device, pipelineLayoutInfo };
+		m_pipelineLayout = raii::PipelineLayout{ m_device, pipelineLayoutInfo };
 
 		GraphicsPipelineCreateInfo graphicsPipelineCreateInfo{};
 		graphicsPipelineCreateInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
@@ -429,11 +467,11 @@ class HelloTriangleApplication
 		graphicsPipelineCreateInfo.pMultisampleState = &multisampling;
 		graphicsPipelineCreateInfo.pColorBlendState = &colorBlending;
 		graphicsPipelineCreateInfo.pDynamicState = &dynamicState;
-		graphicsPipelineCreateInfo.layout = pipelineLayout;
+		graphicsPipelineCreateInfo.layout = m_pipelineLayout;
 
 		PipelineRenderingCreateInfo pipelineRenderingCreateInfo{};
 		pipelineRenderingCreateInfo.colorAttachmentCount = 1;
-		pipelineRenderingCreateInfo.pColorAttachmentFormats = &swapChainSurfaceFormat.format;
+		pipelineRenderingCreateInfo.pColorAttachmentFormats = &m_swapChainSurfaceFormat.format;
 
 		StructureChain<GraphicsPipelineCreateInfo, PipelineRenderingCreateInfo> pipelineCreateInfoChain
 		{
@@ -441,31 +479,63 @@ class HelloTriangleApplication
 			pipelineRenderingCreateInfo
 		};
 
-		graphicsPipeline = raii::Pipeline{ device, nullptr, pipelineCreateInfoChain.get<GraphicsPipelineCreateInfo>() };
+		m_graphicsPipeline = raii::Pipeline{ m_device, nullptr, pipelineCreateInfoChain.get<GraphicsPipelineCreateInfo>() };
 	}
 
 	void CreateCommandPool()
 	{
 		CommandPoolCreateInfo poolInfo{};
 		poolInfo.flags = CommandPoolCreateFlagBits::eResetCommandBuffer;
-		poolInfo.queueFamilyIndex = queueIndex;
+		poolInfo.queueFamilyIndex = m_queueIndex;
 
-		commandPool = raii::CommandPool{ device, poolInfo };
+		m_commandPool = raii::CommandPool{ m_device, poolInfo };
+	}
+
+	void CreateVertexBuffer()
+	{
+		BufferCreateInfo bufferInfo{};
+		bufferInfo.size = sizeof(vertices[0]) * vertices.size();
+		bufferInfo.usage = BufferUsageFlagBits::eVertexBuffer;
+		bufferInfo.sharingMode = SharingMode::eExclusive;
+		m_vertexBuffer = raii::Buffer{ m_device, bufferInfo };
+
+		MemoryRequirements memRequirements = m_vertexBuffer.getMemoryRequirements();
+
+		MemoryAllocateInfo allocInfo{};
+		allocInfo.allocationSize = memRequirements.size;
+		allocInfo.memoryTypeIndex = FindMemoryType(memRequirements.memoryTypeBits, MemoryPropertyFlagBits::eHostVisible | MemoryPropertyFlagBits::eHostCoherent);
+		m_vertexBufferMemory = raii::DeviceMemory{ m_device, allocInfo };
+		m_vertexBuffer.bindMemory(*m_vertexBufferMemory, 0);
+
+		void* data = m_vertexBufferMemory.mapMemory(0, bufferInfo.size);
+		memcpy(data, vertices.data(), (size_t)bufferInfo.size);
+		m_vertexBufferMemory.unmapMemory();
+	}
+
+	uint32_t FindMemoryType(uint32_t typeFilter, MemoryPropertyFlags properties)
+	{
+		PhysicalDeviceMemoryProperties memProperties = m_physicalDevice.getMemoryProperties();
+		for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++)
+		{
+			if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) return i;
+		}
+
+		throw runtime_error("failed to find suitable memory type!");
 	}
 
 	void CreateCommandBuffer()
 	{
 		CommandBufferAllocateInfo allocInfo{};
-		allocInfo.commandPool = commandPool;
+		allocInfo.commandPool = m_commandPool;
 		allocInfo.level = CommandBufferLevel::ePrimary;
 		allocInfo.commandBufferCount = MAX_FRAMES_IN_FLIGHT;
 
-		commandBuffers = raii::CommandBuffers{ device, allocInfo };
+		m_commandBuffers = raii::CommandBuffers{ m_device, allocInfo };
 	}
 
 	void RecordCommandBuffer(uint32_t imageIndex)
 	{
-		commandBuffers[currentFrame].begin(CommandBufferBeginInfo{});
+		m_commandBuffers[m_currentFrame].begin(CommandBufferBeginInfo{});
 
 		TransitionImageLayout
 		(
@@ -481,7 +551,7 @@ class HelloTriangleApplication
 		const ClearValue clearColor = ClearColorValue{ array<float, 4>{ 0.2f, 0.2f, 0.2f, 1.0f } };
 
 		RenderingAttachmentInfo colorAttachmentInfo{};
-		colorAttachmentInfo.imageView = *swapChainImageViews[imageIndex];
+		colorAttachmentInfo.imageView = *m_swapChainImageViews[imageIndex];
 		colorAttachmentInfo.imageLayout = ImageLayout::eColorAttachmentOptimal;
 		colorAttachmentInfo.loadOp = AttachmentLoadOp::eClear;
 		colorAttachmentInfo.storeOp = AttachmentStoreOp::eStore;
@@ -489,19 +559,20 @@ class HelloTriangleApplication
 
 		RenderingInfo renderingInfo{};
 		renderingInfo.renderArea.offset = Offset2D{ 0, 0 };
-		renderingInfo.renderArea.extent = swapChainExtent;
+		renderingInfo.renderArea.extent = m_swapChainExtent;
 		renderingInfo.layerCount = 1;
 		renderingInfo.colorAttachmentCount = 1;
 		renderingInfo.pColorAttachments = &colorAttachmentInfo;
 
-		commandBuffers[currentFrame].beginRendering(renderingInfo);
+		m_commandBuffers[m_currentFrame].beginRendering(renderingInfo);
 
-		commandBuffers[currentFrame].bindPipeline(PipelineBindPoint::eGraphics, *graphicsPipeline);
-		commandBuffers[currentFrame].setViewport(0, Viewport{ 0.0f, 0.0f, static_cast<float>(swapChainExtent.width), static_cast<float>(swapChainExtent.height), 0.0f, 1.0f });
-		commandBuffers[currentFrame].setScissor(0, Rect2D{ Offset2D{ 0, 0 }, swapChainExtent });
-		commandBuffers[currentFrame].draw(3, 1, 0, 0);
+		m_commandBuffers[m_currentFrame].bindPipeline(PipelineBindPoint::eGraphics, *m_graphicsPipeline);
+		m_commandBuffers[m_currentFrame].setViewport(0, Viewport{ 0.0f, 0.0f, static_cast<float>(m_swapChainExtent.width), static_cast<float>(m_swapChainExtent.height), 0.0f, 1.0f });
+		m_commandBuffers[m_currentFrame].setScissor(0, Rect2D{ Offset2D{ 0, 0 }, m_swapChainExtent });
+		m_commandBuffers[m_currentFrame].bindVertexBuffers(0, { *m_vertexBuffer }, { 0 });
+		m_commandBuffers[m_currentFrame].draw(3, 1, 0, 0);
 
-		commandBuffers[currentFrame].endRendering();
+		m_commandBuffers[m_currentFrame].endRendering();
 
 		TransitionImageLayout
 		(
@@ -514,7 +585,7 @@ class HelloTriangleApplication
 			PipelineStageFlagBits2::eBottomOfPipe
 		);
 
-		commandBuffers[currentFrame].end();
+		m_commandBuffers[m_currentFrame].end();
 	}
 
 	void TransitionImageLayout
@@ -537,7 +608,7 @@ class HelloTriangleApplication
 		barrier.newLayout = newLayout;
 		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-		barrier.image = swapChainImages[imageIndex];
+		barrier.image = m_swapChainImages[imageIndex];
 		barrier.subresourceRange.aspectMask = ImageAspectFlagBits::eColor;
 		barrier.subresourceRange.baseMipLevel = 0;
 		barrier.subresourceRange.levelCount = 1;
@@ -547,66 +618,66 @@ class HelloTriangleApplication
 		DependencyInfo dependencyInfo{};
 		dependencyInfo.imageMemoryBarrierCount = 1;
 		dependencyInfo.pImageMemoryBarriers = &barrier;
-		commandBuffers[currentFrame].pipelineBarrier2(dependencyInfo);
+		m_commandBuffers[m_currentFrame].pipelineBarrier2(dependencyInfo);
 	}
 
 	void CreateSyncObjects()
 	{
-		presentCompleteSemaphore.clear();
-		renderFinishedSemaphore.clear();
-		inFlightFences.clear();
+		m_presentCompleteSemaphore.clear();
+		m_renderFinishedSemaphore.clear();
+		m_inFlightFences.clear();
 
-		for (size_t i = 0; i < swapChainImages.size(); i++)
+		for (size_t i = 0; i < m_swapChainImages.size(); i++)
 		{
-			presentCompleteSemaphore.emplace_back(device, SemaphoreCreateInfo{});
-			renderFinishedSemaphore.emplace_back(device, SemaphoreCreateInfo{});
+			m_presentCompleteSemaphore.emplace_back(m_device, SemaphoreCreateInfo{});
+			m_renderFinishedSemaphore.emplace_back(m_device, SemaphoreCreateInfo{});
 		}
 
 		FenceCreateInfo fenceInfo{};
 		fenceInfo.flags = FenceCreateFlagBits::eSignaled;
 
-		for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) inFlightFences.emplace_back(device, fenceInfo);
+		for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) m_inFlightFences.emplace_back(m_device, fenceInfo);
 	}
 
 	void DrawFrame()
 	{
-		while (device.waitForFences(*inFlightFences[currentFrame], True, UINT64_MAX) == Result::eTimeout);
+		while (m_device.waitForFences(*m_inFlightFences[m_currentFrame], True, UINT64_MAX) == Result::eTimeout);
 
-		auto [result, imageIndex] = swapChain.acquireNextImage(UINT64_MAX, *presentCompleteSemaphore[semaphoreIndex], nullptr);
+		auto [result, imageIndex] = m_swapChain.acquireNextImage(UINT64_MAX, *m_presentCompleteSemaphore[m_semaphoreIndex], nullptr);
 
 		if (result == Result::eErrorOutOfDateKHR) { RecreateSwapChain(); return; }
 		else if (result != Result::eSuccess && result != Result::eSuboptimalKHR) throw runtime_error("failed to acquire swap chain image!");
 
-		device.resetFences(*inFlightFences[currentFrame]);
-		commandBuffers[currentFrame].reset();
+		m_device.resetFences(*m_inFlightFences[m_currentFrame]);
+		m_commandBuffers[m_currentFrame].reset();
 		RecordCommandBuffer(imageIndex);
 
 		PipelineStageFlags waitDestinationStageMask = PipelineStageFlagBits::eColorAttachmentOutput;
 
 		SubmitInfo submitInfo{};
 		submitInfo.waitSemaphoreCount = 1;
-		submitInfo.pWaitSemaphores = &*presentCompleteSemaphore[semaphoreIndex];
+		submitInfo.pWaitSemaphores = &*m_presentCompleteSemaphore[m_semaphoreIndex];
 		submitInfo.pWaitDstStageMask = &waitDestinationStageMask;
 		submitInfo.commandBufferCount = 1;
-		submitInfo.pCommandBuffers = &*commandBuffers[currentFrame];
+		submitInfo.pCommandBuffers = &*m_commandBuffers[m_currentFrame];
 		submitInfo.signalSemaphoreCount = 1;
-		submitInfo.pSignalSemaphores = &*renderFinishedSemaphore[imageIndex];
-		queue.submit(submitInfo, *inFlightFences[currentFrame]);
+		submitInfo.pSignalSemaphores = &*m_renderFinishedSemaphore[imageIndex];
+		m_queue.submit(submitInfo, *m_inFlightFences[m_currentFrame]);
 
 		PresentInfoKHR presentInfoKHR{};
 		presentInfoKHR.waitSemaphoreCount = 1;
-		presentInfoKHR.pWaitSemaphores = &*renderFinishedSemaphore[imageIndex];
+		presentInfoKHR.pWaitSemaphores = &*m_renderFinishedSemaphore[imageIndex];
 		presentInfoKHR.swapchainCount = 1;
-		presentInfoKHR.pSwapchains = &*swapChain;
+		presentInfoKHR.pSwapchains = &*m_swapChain;
 		presentInfoKHR.pImageIndices = &imageIndex;
 		
 		try
 		{
-			result = queue.presentKHR(presentInfoKHR);
+			result = m_queue.presentKHR(presentInfoKHR);
 
-			if (result == Result::eErrorOutOfDateKHR || result == Result::eSuboptimalKHR || framebufferResized)
+			if (result == Result::eErrorOutOfDateKHR || result == Result::eSuboptimalKHR || m_framebufferResized)
 			{
-				framebufferResized = false;
+				m_framebufferResized = false;
 				RecreateSwapChain();
 			}
 			else if (result != Result::eSuccess) throw runtime_error("failed to present swap chain image!");
@@ -621,8 +692,8 @@ class HelloTriangleApplication
 			else throw;
 		}
 
-		semaphoreIndex = (semaphoreIndex + 1) % presentCompleteSemaphore.size();
-		currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
+		m_semaphoreIndex = (m_semaphoreIndex + 1) % m_presentCompleteSemaphore.size();
+		m_currentFrame = (m_currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 	}
 
 	[[nodiscard]] raii::ShaderModule CreateShaderModule(const vector<char>& code) const
@@ -631,7 +702,7 @@ class HelloTriangleApplication
 		createInfo.codeSize = code.size();
 		createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data());
 
-		raii::ShaderModule shaderModule{ device, createInfo };
+		raii::ShaderModule shaderModule{ m_device, createInfo };
 
 		return shaderModule;
 	}
@@ -665,7 +736,7 @@ class HelloTriangleApplication
 
 		int width = 0;
 		int height = 0;
-		glfwGetFramebufferSize(window.get(), &width, &height);
+		glfwGetFramebufferSize(m_window.get(), &width, &height);
 
 		return
 		{
