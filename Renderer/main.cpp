@@ -5,9 +5,16 @@ import vulkan_hpp;
 
 #include <vulkan/vulkan_raii.hpp>
 
+#define GLFW_INCLUDE_VULKAN
+#include <GLFW/glfw3.h>
+
+#define GLM_FORCE_RADIANS
+#define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
-#include <GLFW/glfw3.h>
+
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
 
 #include <memory>
 #include <iostream>
@@ -20,16 +27,18 @@ using namespace vk;
 
 struct Vertex
 {
-	glm::vec2 pos;
-	glm::vec3 color;
+	glm::vec3 pos;
+	glm::vec3 col;
+	glm::vec2 UV;
 
 	static VertexInputBindingDescription getBindingDescription() { return { 0, sizeof(Vertex), VertexInputRate::eVertex }; }
-	static array<VertexInputAttributeDescription, 2> getAttributeDescriptions()
+	static array<VertexInputAttributeDescription, 3> getAttributeDescriptions()
 	{
 		return
 		{
-			VertexInputAttributeDescription(0, 0, Format::eR32G32Sfloat, offsetof(Vertex, pos)),
-			VertexInputAttributeDescription(1, 0, Format::eR32G32B32Sfloat, offsetof(Vertex, color))
+			VertexInputAttributeDescription(0, 0, Format::eR32G32B32Sfloat, offsetof(Vertex, pos)),
+			VertexInputAttributeDescription(1, 0, Format::eR32G32B32Sfloat, offsetof(Vertex, col)),
+			VertexInputAttributeDescription(2, 0, Format::eR32G32Sfloat, offsetof(Vertex, UV))
 		};
 	}
 };
@@ -44,15 +53,23 @@ struct MatrixUB
 
 const vector<Vertex> vertices =
 {
-	{ { -0.5f, -0.5f }, { 1.0f, 0.0f, 0.0f } },
-	{ {  0.5f, -0.5f }, { 0.0f, 1.0f, 0.0f } },
-	{ {  0.5f,  0.5f }, { 0.0f, 0.0f, 1.0f } },
-	{ { -0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f } }
+	{ { -0.5f, -0.5f, 0.0f }, { 1.0f, 0.0f, 0.0f }, { 1.0f, 0.0f } },
+	{ {  0.5f, -0.5f, 0.0f }, { 0.0f, 1.0f, 0.0f }, { 0.0f, 0.0f } },
+	{ {  0.5f,  0.5f, 0.0f }, { 0.0f, 0.0f, 1.0f }, { 0.0f, 1.0f } },
+	{ { -0.5f,  0.5f, 0.0f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 1.0f } },
+
+	{ { -0.5f, -0.5f, -0.5f }, { 1.0f, 0.0f, 0.0f }, { 1.0f, 0.0f } },
+	{ {  0.5f, -0.5f, -0.5f }, { 0.0f, 1.0f, 0.0f }, { 0.0f, 0.0f } },
+	{ {  0.5f,  0.5f, -0.5f }, { 0.0f, 0.0f, 1.0f }, { 0.0f, 1.0f } },
+	{ { -0.5f,  0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 1.0f } }
 };
 const vector<uint16_t> indices =
 {
 	0, 1, 2,
-	2, 3, 0
+	2, 3, 0,
+
+	4, 5, 6,
+	6, 7, 4
 };
 
 class HelloTriangleApplication
@@ -96,11 +113,20 @@ class HelloTriangleApplication
 	vector<raii::ImageView> m_swapChainImageViews;
 
 	raii::DescriptorSetLayout m_descriptorSetLayout = nullptr;
-	raii::DescriptorPool m_descriptorPool = nullptr;
-	vector<raii::DescriptorSet> m_descriptorSets;
+
+	raii::RenderPass m_renderPass = nullptr;
 
 	raii::PipelineLayout m_pipelineLayout = nullptr;
 	raii::Pipeline m_graphicsPipeline = nullptr;
+
+	raii::Image m_depthImage = nullptr;
+	raii::DeviceMemory m_depthImageMemory = nullptr;
+	raii::ImageView m_depthImageView = nullptr;
+
+	raii::Image m_textureImage = nullptr;
+	raii::DeviceMemory m_textureImageMemory = nullptr;
+	raii::ImageView m_textureImageView = nullptr;
+	raii::Sampler m_textureSampler = nullptr;
 
 	raii::Buffer m_vertexBuffer = nullptr;
 	raii::DeviceMemory m_vertexBufferMemory = nullptr;
@@ -110,6 +136,9 @@ class HelloTriangleApplication
 	vector<raii::Buffer> m_uniformBuffers;
 	vector<raii::DeviceMemory> m_uniformBuffersMemory;
 	vector<void*> m_uniformBuffersMapped;
+
+	raii::DescriptorPool m_descriptorPool = nullptr;
+	vector<raii::DescriptorSet> m_descriptorSets;
 
 	raii::CommandPool m_commandPool = nullptr;
 	vector<raii::CommandBuffer> m_commandBuffers;
@@ -156,6 +185,10 @@ class HelloTriangleApplication
 		CreateDescriptorSetLayout();
 		CreateGraphicsPipeline();
 		CreateCommandPool();
+		CreateDepthResources();
+		CreateTextureImage();
+		CreateTextureImageView();
+		CreateTextureSampler();
 		CreateVertexBuffer();
 		CreateIndexBuffer();
 		CreateUniformBuffers();
@@ -251,8 +284,18 @@ class HelloTriangleApplication
 	{
 		if (!ENABLE_VALIDATION_LAYERS) return;
 
-		DebugUtilsMessageSeverityFlagsEXT severityFlags(DebugUtilsMessageSeverityFlagBitsEXT::eVerbose | DebugUtilsMessageSeverityFlagBitsEXT::eWarning | DebugUtilsMessageSeverityFlagBitsEXT::eError);
-		DebugUtilsMessageTypeFlagsEXT messageTypeFlags(DebugUtilsMessageTypeFlagBitsEXT::eGeneral | DebugUtilsMessageTypeFlagBitsEXT::ePerformance | DebugUtilsMessageTypeFlagBitsEXT::eValidation);
+		DebugUtilsMessageSeverityFlagsEXT severityFlags
+		(
+			DebugUtilsMessageSeverityFlagBitsEXT::eVerbose |
+			DebugUtilsMessageSeverityFlagBitsEXT::eWarning |
+			DebugUtilsMessageSeverityFlagBitsEXT::eError
+		);
+		DebugUtilsMessageTypeFlagsEXT messageTypeFlags
+		(
+			DebugUtilsMessageTypeFlagBitsEXT::eGeneral |
+			DebugUtilsMessageTypeFlagBitsEXT::ePerformance |
+			DebugUtilsMessageTypeFlagBitsEXT::eValidation
+		);
 
 		DebugUtilsMessengerCreateInfoEXT debugUtilsMessengerCreateInfoEXT{};
 		debugUtilsMessengerCreateInfoEXT.messageSeverity = severityFlags;
@@ -300,8 +343,16 @@ class HelloTriangleApplication
 					}
 				);
 
-				auto features = device.template getFeatures2<PhysicalDeviceFeatures2, PhysicalDeviceVulkan11Features, PhysicalDeviceVulkan13Features, PhysicalDeviceExtendedDynamicStateFeaturesEXT>();
+				auto features = device.template getFeatures2
+					<
+					PhysicalDeviceFeatures2,
+					PhysicalDeviceVulkan11Features,
+					PhysicalDeviceVulkan13Features,
+					PhysicalDeviceExtendedDynamicStateFeaturesEXT
+					>();
+				
 				bool supportsRequiredFeatures =
+					features.template get<PhysicalDeviceFeatures2>().features.samplerAnisotropy &&
 					features.template get<PhysicalDeviceVulkan11Features>().shaderDrawParameters &&
 					features.template get<PhysicalDeviceVulkan13Features>().synchronization2 &&
 					features.template get<PhysicalDeviceVulkan13Features>().dynamicRendering &&
@@ -329,6 +380,7 @@ class HelloTriangleApplication
 		if (m_queueIndex == ~0) throw runtime_error("Could not find a queue for graphics and present -> terminating");
 
 		PhysicalDeviceFeatures2 featureChain = {};
+		featureChain.features.samplerAnisotropy = true;
 
 		PhysicalDeviceVulkan11Features vulkan11Features = {};
 		vulkan11Features.shaderDrawParameters = true;
@@ -416,63 +468,31 @@ class HelloTriangleApplication
 		}
 	}
 
-	void CreateDescriptorPool()
-	{
-		DescriptorPoolSize poolSize{};
-		poolSize.type = DescriptorType::eUniformBuffer;
-		poolSize.descriptorCount = MAX_FRAMES_IN_FLIGHT;
-
-		DescriptorPoolCreateInfo poolInfo{};
-		poolInfo.flags = DescriptorPoolCreateFlagBits::eFreeDescriptorSet;
-		poolInfo.maxSets = MAX_FRAMES_IN_FLIGHT;
-		poolInfo.poolSizeCount = 1;
-		poolInfo.pPoolSizes = &poolSize;
-
-		m_descriptorPool = raii::DescriptorPool{ m_device, poolInfo };
-	}
-
-	void CreateDescriptorSets()
-	{
-		vector<DescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, *m_descriptorSetLayout);
-		DescriptorSetAllocateInfo allocInfo{};
-		allocInfo.descriptorPool = *m_descriptorPool;
-		allocInfo.descriptorSetCount = static_cast<uint32_t>(layouts.size());
-		allocInfo.pSetLayouts = layouts.data();
-
-		m_descriptorSets = m_device.allocateDescriptorSets(allocInfo);
-
-		for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
-		{
-			constexpr size_t BUFFER_SIZE = sizeof(MatrixUB);
-
-			DescriptorBufferInfo bufferInfo{};
-			bufferInfo.buffer = *m_uniformBuffers[i];
-			bufferInfo.offset = 0;
-			bufferInfo.range = BUFFER_SIZE;
-
-			WriteDescriptorSet descriptorWrite{};
-			descriptorWrite.dstSet = *m_descriptorSets[i];
-			descriptorWrite.dstBinding = 0;
-			descriptorWrite.dstArrayElement = 0;
-			descriptorWrite.descriptorCount = 1;
-			descriptorWrite.descriptorType = DescriptorType::eUniformBuffer;
-			descriptorWrite.pBufferInfo = &bufferInfo;
-
-			m_device.updateDescriptorSets(descriptorWrite, nullptr);
-		}
-	}
-
 	void CreateDescriptorSetLayout()
 	{
-		DescriptorSetLayoutBinding uboLayoutBinding{};
-		uboLayoutBinding.binding = 0;
-		uboLayoutBinding.descriptorType = DescriptorType::eUniformBuffer;
-		uboLayoutBinding.descriptorCount = 1;
-		uboLayoutBinding.stageFlags = ShaderStageFlagBits::eVertex;
+		array bindingFlags =
+		{
+			DescriptorSetLayoutBinding
+			(
+				0,
+				DescriptorType::eUniformBuffer,
+				1,
+				ShaderStageFlagBits::eVertex,
+				nullptr
+			),
+			DescriptorSetLayoutBinding
+			(
+				1,
+				DescriptorType::eCombinedImageSampler,
+				1,
+				ShaderStageFlagBits::eFragment,
+				nullptr
+			)
+		};
 
 		DescriptorSetLayoutCreateInfo layoutInfo{};
-		layoutInfo.bindingCount = 1;
-		layoutInfo.pBindings = &uboLayoutBinding;
+		layoutInfo.bindingCount = static_cast<uint32_t>(bindingFlags.size());
+		layoutInfo.pBindings = bindingFlags.data();
 
 		m_descriptorSetLayout = raii::DescriptorSetLayout{ m_device, layoutInfo };
 	}
@@ -494,7 +514,7 @@ class HelloTriangleApplication
 		array<PipelineShaderStageCreateInfo, 2> shaderStages = { vertShaderStageInfo, fragShaderStageInfo };
 
 		VertexInputBindingDescription bindingDescription = Vertex::getBindingDescription();
-		array<VertexInputAttributeDescription, 2> attributeDescriptions = Vertex::getAttributeDescriptions();
+		array<VertexInputAttributeDescription, 3> attributeDescriptions = Vertex::getAttributeDescriptions();
 
 		PipelineVertexInputStateCreateInfo vertexInputInfo{};
 		vertexInputInfo.vertexBindingDescriptionCount = 1;
@@ -522,6 +542,13 @@ class HelloTriangleApplication
 		PipelineMultisampleStateCreateInfo multisampling{};
 		multisampling.rasterizationSamples = SampleCountFlagBits::e1;
 		multisampling.sampleShadingEnable = False;
+
+		PipelineDepthStencilStateCreateInfo depthStencil{};
+		depthStencil.depthTestEnable = True;
+		depthStencil.depthWriteEnable = True;
+		depthStencil.depthCompareOp = CompareOp::eLess;
+		depthStencil.depthBoundsTestEnable = False;
+		depthStencil.stencilTestEnable = False;
 
 		PipelineColorBlendAttachmentState colorBlendAttachment{};
 		colorBlendAttachment.blendEnable = False;
@@ -558,6 +585,7 @@ class HelloTriangleApplication
 		graphicsPipelineCreateInfo.pViewportState = &viewportState;
 		graphicsPipelineCreateInfo.pRasterizationState = &rasterizer;
 		graphicsPipelineCreateInfo.pMultisampleState = &multisampling;
+		graphicsPipelineCreateInfo.pDepthStencilState = &depthStencil;
 		graphicsPipelineCreateInfo.pColorBlendState = &colorBlending;
 		graphicsPipelineCreateInfo.pDynamicState = &dynamicState;
 		graphicsPipelineCreateInfo.layout = m_pipelineLayout;
@@ -565,6 +593,7 @@ class HelloTriangleApplication
 		PipelineRenderingCreateInfo pipelineRenderingCreateInfo{};
 		pipelineRenderingCreateInfo.colorAttachmentCount = 1;
 		pipelineRenderingCreateInfo.pColorAttachmentFormats = &m_swapChainSurfaceFormat.format;
+		pipelineRenderingCreateInfo.depthAttachmentFormat = FindDepthFormat();
 
 		StructureChain<GraphicsPipelineCreateInfo, PipelineRenderingCreateInfo> pipelineCreateInfoChain
 		{
@@ -582,6 +611,294 @@ class HelloTriangleApplication
 		poolInfo.queueFamilyIndex = m_queueIndex;
 
 		m_commandPool = raii::CommandPool{ m_device, poolInfo };
+	}
+
+	void CreateDepthResources()
+	{
+		Format depthFormat = FindDepthFormat();
+		CreateImage
+		(
+			m_swapChainExtent.width,
+			m_swapChainExtent.height,
+			depthFormat,
+			ImageTiling::eOptimal,
+			ImageUsageFlagBits::eDepthStencilAttachment,
+			MemoryPropertyFlagBits::eDeviceLocal,
+			m_depthImage,
+			m_depthImageMemory
+		);
+
+		m_depthImageView = CreateImageView(m_depthImage, depthFormat, ImageAspectFlagBits::eDepth);
+		TransitionImageLayout(m_depthImage, ImageLayout::eUndefined, ImageLayout::eDepthStencilAttachmentOptimal);
+	}
+
+	Format FindDepthFormat()
+	{
+		return FindSupportedFormat
+		(
+			{ Format::eD32Sfloat, Format::eD32SfloatS8Uint, Format::eD24UnormS8Uint },
+			ImageTiling::eOptimal,
+			FormatFeatureFlagBits::eDepthStencilAttachment
+		);
+	}
+
+	Format FindSupportedFormat(const vector<Format>& candidates, ImageTiling tiling, FormatFeatureFlags features)
+	{
+		for (Format format : candidates)
+		{
+			FormatProperties props = m_physicalDevice.getFormatProperties(format);
+			if (tiling == ImageTiling::eLinear && (props.linearTilingFeatures & features) == features) return format;
+			else if (tiling == ImageTiling::eOptimal && (props.optimalTilingFeatures & features) == features) return format;
+		}
+		throw runtime_error("failed to find supported format!");
+	}
+
+	bool HasStencilComponent(Format format)
+	{
+		return format == Format::eD32SfloatS8Uint || format == Format::eD24UnormS8Uint;
+	}
+
+	void CreateTextureImage()
+	{
+		int texWidth = 0;
+		int texHeight = 0;
+		int texChannels = 0;
+		stbi_uc* pixels = stbi_load("Texture/Texture.jpg", &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+		DeviceSize imageSize = static_cast<DeviceSize>(texWidth) * static_cast<DeviceSize>(texHeight) * STBI_rgb_alpha;
+
+		if (!pixels) throw runtime_error("failed to load texture image!");
+
+		raii::Buffer stagingBuffer({});
+		raii::DeviceMemory stagingBufferMemory({});
+
+		CreateBuffer
+		(
+			stagingBuffer,
+			stagingBufferMemory,
+			imageSize,
+			BufferUsageFlagBits::eTransferSrc,
+			MemoryPropertyFlagBits::eHostVisible | MemoryPropertyFlagBits::eHostCoherent
+		);
+
+		void* data = stagingBufferMemory.mapMemory(0, imageSize);
+		memcpy(data, pixels, static_cast<size_t>(imageSize));
+		stagingBufferMemory.unmapMemory();
+
+		stbi_image_free(pixels);
+
+		CreateImage
+		(
+			static_cast<uint32_t>(texWidth),
+			static_cast<uint32_t>(texHeight),
+			Format::eR8G8B8A8Srgb,
+			ImageTiling::eOptimal,
+			ImageUsageFlagBits::eTransferDst | ImageUsageFlagBits::eSampled,
+			MemoryPropertyFlagBits::eDeviceLocal,
+			m_textureImage,
+			m_textureImageMemory
+		);
+		
+		TransitionImageLayout(m_textureImage, ImageLayout::eUndefined, ImageLayout::eTransferDstOptimal);
+		CopyBufferToImage(stagingBuffer, m_textureImage, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight));
+		TransitionImageLayout(m_textureImage, ImageLayout::eTransferDstOptimal, ImageLayout::eShaderReadOnlyOptimal);
+	}
+
+	void CreateTextureImageView()
+	{
+		m_textureImageView = CreateImageView(m_textureImage, Format::eR8G8B8A8Srgb);
+	}
+
+	void CreateTextureSampler()
+	{
+		PhysicalDeviceProperties properties = m_physicalDevice.getProperties();
+
+		SamplerCreateInfo samplerInfo{};
+		samplerInfo.magFilter = Filter::eLinear;
+		samplerInfo.minFilter = Filter::eLinear;
+		samplerInfo.addressModeU = SamplerAddressMode::eRepeat;
+		samplerInfo.addressModeV = SamplerAddressMode::eRepeat;
+		samplerInfo.addressModeW = SamplerAddressMode::eRepeat;
+		samplerInfo.anisotropyEnable = True;
+		samplerInfo.maxAnisotropy = properties.limits.maxSamplerAnisotropy;
+		samplerInfo.borderColor = BorderColor::eIntOpaqueBlack;
+		samplerInfo.unnormalizedCoordinates = False;
+		samplerInfo.compareEnable = False;
+		samplerInfo.mipmapMode = SamplerMipmapMode::eLinear;
+		samplerInfo.mipLodBias = 0.0f;
+
+		m_textureSampler = raii::Sampler{ m_device, samplerInfo };
+	}
+
+	raii::ImageView CreateImageView(raii::Image& image, Format format, ImageAspectFlags aspectFlags = ImageAspectFlagBits::eColor)
+	{
+		ImageViewCreateInfo viewInfo{};
+		viewInfo.image = *image;
+		viewInfo.viewType = ImageViewType::e2D;
+		viewInfo.format = format;
+		viewInfo.subresourceRange.aspectMask = aspectFlags;
+		viewInfo.subresourceRange.baseMipLevel = 0;
+		viewInfo.subresourceRange.levelCount = 1;
+		viewInfo.subresourceRange.baseArrayLayer = 0;
+		viewInfo.subresourceRange.layerCount = 1;
+
+		return raii::ImageView{ m_device, viewInfo };
+	}
+
+	void CreateImage
+	(
+		uint32_t width,
+		uint32_t height,
+		Format format,
+		ImageTiling tiling,
+		ImageUsageFlags usage,
+		MemoryPropertyFlags properties,
+		raii::Image& image,
+		raii::DeviceMemory& imageMemory
+	)
+	{
+		ImageCreateInfo imageInfo{};
+		imageInfo.imageType = ImageType::e2D;
+		imageInfo.extent.width = width;
+		imageInfo.extent.height = height;
+		imageInfo.extent.depth = 1;
+		imageInfo.mipLevels = 1;
+		imageInfo.arrayLayers = 1;
+		imageInfo.format = format;
+		imageInfo.tiling = tiling;
+		imageInfo.initialLayout = ImageLayout::eUndefined;
+		imageInfo.usage = usage;
+		imageInfo.sharingMode = SharingMode::eExclusive;
+		imageInfo.samples = SampleCountFlagBits::e1;
+		image = raii::Image{ m_device, imageInfo };
+
+		MemoryRequirements memRequirements = image.getMemoryRequirements();
+		MemoryAllocateInfo allocInfo{};
+
+		allocInfo.allocationSize = memRequirements.size;
+		allocInfo.memoryTypeIndex = FindMemoryType(memRequirements.memoryTypeBits, properties);
+
+		imageMemory = raii::DeviceMemory{ m_device, allocInfo };
+		image.bindMemory(*imageMemory, 0);
+	}
+
+	void TransitionImageLayout(raii::Image& image, ImageLayout oldLayout, ImageLayout newLayout)
+	{
+		unique_ptr<raii::CommandBuffer> commandBuffer = BeginSingleTimeCommands();
+
+		ImageMemoryBarrier barrier{};
+		barrier.oldLayout = oldLayout;
+		barrier.newLayout = newLayout;
+		barrier.image = *image;
+		barrier.subresourceRange.aspectMask = ImageAspectFlagBits::eColor;
+		barrier.subresourceRange.baseMipLevel = 0;
+		barrier.subresourceRange.levelCount = 1;
+		barrier.subresourceRange.baseArrayLayer = 0;
+		barrier.subresourceRange.layerCount = 1;
+
+		PipelineStageFlags sourceStage;
+		PipelineStageFlags destinationStage;
+
+		if (newLayout == ImageLayout::eDepthStencilAttachmentOptimal)
+		{
+			barrier.subresourceRange.aspectMask = ImageAspectFlagBits::eDepth;
+			if (HasStencilComponent(FindDepthFormat())) barrier.subresourceRange.aspectMask |= ImageAspectFlagBits::eStencil;
+		}
+		else barrier.subresourceRange.aspectMask = ImageAspectFlagBits::eColor;
+
+		if (oldLayout == ImageLayout::eUndefined && newLayout == ImageLayout::eTransferDstOptimal)
+		{
+			barrier.srcAccessMask = {};
+			barrier.dstAccessMask = AccessFlagBits::eTransferWrite;
+			sourceStage = PipelineStageFlagBits::eTopOfPipe;
+			destinationStage = PipelineStageFlagBits::eTransfer;
+		}
+		else if (oldLayout == ImageLayout::eTransferDstOptimal && newLayout == ImageLayout::eShaderReadOnlyOptimal)
+		{
+			barrier.srcAccessMask = AccessFlagBits::eTransferWrite;
+			barrier.dstAccessMask = AccessFlagBits::eShaderRead;
+			sourceStage = PipelineStageFlagBits::eTransfer;
+			destinationStage = PipelineStageFlagBits::eFragmentShader;
+		}
+		else if (oldLayout == ImageLayout::eUndefined && newLayout == ImageLayout::eDepthStencilAttachmentOptimal)
+		{
+			barrier.srcAccessMask = {};
+			barrier.dstAccessMask = AccessFlagBits::eDepthStencilAttachmentRead | AccessFlagBits::eDepthStencilAttachmentWrite;
+			sourceStage = PipelineStageFlagBits::eTopOfPipe;
+			destinationStage = PipelineStageFlagBits::eEarlyFragmentTests;
+		}
+		else throw invalid_argument("unsupported layout transition!");
+
+		commandBuffer->pipelineBarrier
+		(
+			sourceStage,
+			destinationStage,
+			{},
+			nullptr,
+			nullptr,
+			barrier
+		);
+		EndSingleTimeCommands(*commandBuffer);
+	}
+
+	void CopyBufferToImage
+	(
+		raii::Buffer& buffer,
+		raii::Image& image,
+		uint32_t width,
+		uint32_t height
+	)
+	{
+		unique_ptr<raii::CommandBuffer> commandBuffer = BeginSingleTimeCommands();
+
+		BufferImageCopy region{};
+		region.bufferOffset = 0;
+		region.bufferRowLength = 0;
+		region.bufferImageHeight = 0;
+		region.imageSubresource.aspectMask = ImageAspectFlagBits::eColor;
+		region.imageSubresource.mipLevel = 0;
+		region.imageSubresource.baseArrayLayer = 0;
+		region.imageSubresource.layerCount = 1;
+		region.imageOffset = Offset3D{ 0, 0, 0 };
+		region.imageExtent = Extent3D{ width, height, 1 };
+
+		commandBuffer->copyBufferToImage
+		(
+			*buffer,
+			*image,
+			ImageLayout::eTransferDstOptimal,
+			region
+		);
+		EndSingleTimeCommands(*commandBuffer);
+	}
+
+	void CreateVertexBuffer()
+	{
+		DeviceSize bufferSize = sizeof(vertices[0]) * vertices.size();
+		raii::Buffer stagingBuffer({});
+		raii::DeviceMemory stagingBufferMemory({});
+		CreateBuffer(stagingBuffer, stagingBufferMemory, bufferSize, BufferUsageFlagBits::eTransferSrc, MemoryPropertyFlagBits::eHostVisible | MemoryPropertyFlagBits::eHostCoherent);
+
+		void* dataStaging = stagingBufferMemory.mapMemory(0, bufferSize);
+		memcpy(dataStaging, vertices.data(), static_cast<size_t>(bufferSize));
+		stagingBufferMemory.unmapMemory();
+
+		CreateBuffer(m_vertexBuffer, m_vertexBufferMemory, bufferSize, BufferUsageFlagBits::eTransferDst | BufferUsageFlagBits::eVertexBuffer, MemoryPropertyFlagBits::eDeviceLocal);
+		CopyBuffer(stagingBuffer, m_vertexBuffer, bufferSize);
+	}
+
+	void CreateIndexBuffer()
+	{
+		DeviceSize bufferSize = sizeof(indices[0]) * indices.size();
+		raii::Buffer stagingBuffer({});
+		raii::DeviceMemory stagingBufferMemory({});
+		CreateBuffer(stagingBuffer, stagingBufferMemory, bufferSize, BufferUsageFlagBits::eTransferSrc, MemoryPropertyFlagBits::eHostVisible | MemoryPropertyFlagBits::eHostCoherent);
+
+		void* data = stagingBufferMemory.mapMemory(0, bufferSize);
+		memcpy(data, indices.data(), static_cast<size_t>(bufferSize));
+		stagingBufferMemory.unmapMemory();
+
+		CreateBuffer(m_indexBuffer, m_indexBufferMemory, bufferSize, BufferUsageFlagBits::eTransferDst | BufferUsageFlagBits::eIndexBuffer, MemoryPropertyFlagBits::eDeviceLocal);
+		CopyBuffer(stagingBuffer, m_indexBuffer, bufferSize);
 	}
 
 	void CreateUniformBuffers()
@@ -604,37 +921,74 @@ class HelloTriangleApplication
 		}
 	}
 
-	void CreateVertexBuffer()
+	void CreateDescriptorPool()
 	{
-		DeviceSize bufferSize = sizeof(vertices[0]) * vertices.size();
-		raii::Buffer stagingBuffer({});
-		raii::DeviceMemory stagingBufferMemory({});
-		CreateBuffer(stagingBuffer, stagingBufferMemory, bufferSize, BufferUsageFlagBits::eTransferSrc, MemoryPropertyFlagBits::eHostVisible | MemoryPropertyFlagBits::eHostCoherent);
-		
-		void* dataStaging = stagingBufferMemory.mapMemory(0, bufferSize);
-		memcpy(dataStaging, vertices.data(), static_cast<size_t>(bufferSize));
-		stagingBufferMemory.unmapMemory();
+		array<DescriptorPoolSize, 2> poolSizes{};
+		poolSizes[0].type = DescriptorType::eUniformBuffer;
+		poolSizes[0].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+		poolSizes[1].type = DescriptorType::eCombinedImageSampler;
+		poolSizes[1].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
 
-		CreateBuffer(m_vertexBuffer, m_vertexBufferMemory, bufferSize, BufferUsageFlagBits::eTransferDst | BufferUsageFlagBits::eVertexBuffer, MemoryPropertyFlagBits::eDeviceLocal);
-		CopyBuffer(stagingBuffer, m_vertexBuffer, bufferSize);
+		DescriptorPoolCreateInfo poolInfo{};
+		poolInfo.flags = DescriptorPoolCreateFlagBits::eFreeDescriptorSet;
+		poolInfo.maxSets = MAX_FRAMES_IN_FLIGHT;
+		poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+		poolInfo.pPoolSizes = poolSizes.data();
+
+		m_descriptorPool = raii::DescriptorPool{ m_device, poolInfo };
 	}
 
-	void CreateIndexBuffer()
+	void CreateDescriptorSets()
 	{
-		DeviceSize bufferSize = sizeof(indices[0]) * indices.size();
-		raii::Buffer stagingBuffer({});
-		raii::DeviceMemory stagingBufferMemory({});
-		CreateBuffer(stagingBuffer, stagingBufferMemory, bufferSize, BufferUsageFlagBits::eTransferSrc, MemoryPropertyFlagBits::eHostVisible | MemoryPropertyFlagBits::eHostCoherent);
-		
-		void* data = stagingBufferMemory.mapMemory(0, bufferSize);
-		memcpy(data, indices.data(), static_cast<size_t>(bufferSize));
-		stagingBufferMemory.unmapMemory();
+		vector<DescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, *m_descriptorSetLayout);
+		DescriptorSetAllocateInfo allocInfo{};
+		allocInfo.descriptorPool = *m_descriptorPool;
+		allocInfo.descriptorSetCount = static_cast<uint32_t>(layouts.size());
+		allocInfo.pSetLayouts = layouts.data();
 
-		CreateBuffer(m_indexBuffer, m_indexBufferMemory, bufferSize, BufferUsageFlagBits::eTransferDst | BufferUsageFlagBits::eIndexBuffer, MemoryPropertyFlagBits::eDeviceLocal);
-		CopyBuffer(stagingBuffer, m_indexBuffer, bufferSize);
+		m_descriptorSets.clear();
+		m_descriptorSets = m_device.allocateDescriptorSets(allocInfo);
+
+		for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+		{
+			constexpr size_t BUFFER_SIZE = sizeof(MatrixUB);
+
+			DescriptorBufferInfo bufferInfo{};
+			bufferInfo.buffer = *m_uniformBuffers[i];
+			bufferInfo.offset = 0;
+			bufferInfo.range = BUFFER_SIZE;
+
+			DescriptorImageInfo imageInfo{};
+			imageInfo.imageLayout = ImageLayout::eShaderReadOnlyOptimal;
+			imageInfo.imageView = *m_textureImageView;
+			imageInfo.sampler = *m_textureSampler;
+
+			array<WriteDescriptorSet, 2> descriptorWrites{};
+			descriptorWrites[0].dstSet = *m_descriptorSets[i];
+			descriptorWrites[0].dstBinding = 0;
+			descriptorWrites[0].dstArrayElement = 0;
+			descriptorWrites[0].descriptorType = DescriptorType::eUniformBuffer;
+			descriptorWrites[0].descriptorCount = 1;
+			descriptorWrites[0].pBufferInfo = &bufferInfo;
+			descriptorWrites[1].dstSet = *m_descriptorSets[i];
+			descriptorWrites[1].dstBinding = 1;
+			descriptorWrites[1].dstArrayElement = 0;
+			descriptorWrites[1].descriptorType = DescriptorType::eCombinedImageSampler;
+			descriptorWrites[1].descriptorCount = 1;
+			descriptorWrites[1].pImageInfo = &imageInfo;
+
+			m_device.updateDescriptorSets(descriptorWrites, {});
+		}
 	}
 
-	void CreateBuffer(raii::Buffer& buffer, raii::DeviceMemory& bufferMemory, DeviceSize size, BufferUsageFlags usage, MemoryPropertyFlags properties)
+	void CreateBuffer
+	(
+		raii::Buffer& buffer,
+		raii::DeviceMemory& bufferMemory,
+		DeviceSize size,
+		BufferUsageFlags usage,
+		MemoryPropertyFlags properties
+	)
 	{
 		BufferCreateInfo bufferInfo{};
 		bufferInfo.size = size;
@@ -649,6 +1003,31 @@ class HelloTriangleApplication
 		bufferMemory = raii::DeviceMemory{ m_device, memoryAllocateInfo };
 
 		buffer.bindMemory(*bufferMemory, 0);
+	}
+
+	unique_ptr<raii::CommandBuffer> BeginSingleTimeCommands()
+	{
+		CommandBufferAllocateInfo allocInfo{};
+		allocInfo.commandPool = m_commandPool;
+		allocInfo.level = CommandBufferLevel::ePrimary;
+		allocInfo.commandBufferCount = 1;
+
+		raii::CommandBuffer commandBuffer = move(m_device.allocateCommandBuffers(allocInfo).front());
+		commandBuffer.begin(CommandBufferBeginInfo{ CommandBufferUsageFlagBits::eOneTimeSubmit });
+
+		return make_unique<raii::CommandBuffer>(move(commandBuffer));
+	}
+
+	void EndSingleTimeCommands(raii::CommandBuffer& commandBuffer)
+	{
+		commandBuffer.end();
+
+		SubmitInfo submitInfo{};
+		submitInfo.commandBufferCount = 1;
+		submitInfo.pCommandBuffers = &*commandBuffer;
+
+		m_queue.submit(submitInfo, nullptr);
+		m_queue.waitIdle();
 	}
 
 	void CopyBuffer(raii::Buffer& srcBuffer, raii::Buffer& dstBuffer, DeviceSize size)
@@ -931,7 +1310,7 @@ class HelloTriangleApplication
 		};
 	}
 
-	vector<const char*> GetRequiredExtensions()
+	vector<const char*> GetRequiredExtensions() const
 	{
 		uint32_t glfwExtensionCount = 0;
 
